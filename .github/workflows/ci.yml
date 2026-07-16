@@ -1,22 +1,72 @@
+# Pier's pipeline is deliberately secret-free: unit tests fake every
+# provider, the CLI smoke runs --dry-run, and the scaffolded app builds
+# with a well-formed dummy publishable key. The fleet's real keys live in
+# Infisical (pushed by pier at bootstrap time) and never enter this repo
+# or its CI.
 name: CI
 
 on:
   push:
     branches: [main]
   pull_request:
+  schedule:
+    # Weekly canary: the scaffold job installs the latest in-range
+    # Next/Clerk, so upstream breakage surfaces without waiting for a PR.
+    - cron: '0 6 * * 1'
+  workflow_call:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   verify:
+    name: Verify (Node ${{ matrix.node }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node: [22, 24]
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
         with:
-          node-version: 22
+          node-version: ${{ matrix.node }}
           cache: npm
       - run: npm ci
       - run: npm run build
       - run: npm run lint
       - run: npm run format:check
       - run: npm test
-      - run: node dist/index.js --dry-run --yes --name demo
+      - name: CLI smoke (dry run)
+        run: node dist/index.js --dry-run --yes --name demo
+
+  scaffold:
+    name: Build a scaffolded app
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - name: Scaffold the demo app
+        run: |
+          node --input-type=module -e "
+            const m = await import(process.cwd() + '/dist/scaffold.js');
+            await m.writeScaffold(process.env.RUNNER_TEMP + '/demo', m.planScaffold('demo'));
+          "
+      - name: Build the generated app
+        working-directory: ${{ runner.temp }}/demo
+        env:
+          # Well-formed but fake (base64 of clerk.example.com$): next build
+          # needs a syntactically valid key, never a real one.
+          NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY: pk_test_Y2xlcmsuZXhhbXBsZS5jb20k
+        run: |
+          npm install --no-audit --no-fund
+          npm run build

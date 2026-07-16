@@ -1,0 +1,31 @@
+# Pier's own dependencies and the pinned actions. The versions the scaffold
+# writes into generated apps (src/scaffold.ts) are caret ranges, so the
+# weekly CI canary (schedule trigger in ci.yml) already builds them against
+# the latest in-range Next/Clerk — dependabot cannot see those and does not
+# need to.
+version: 2
+updates:
+  - package-ecosystem: npm
+    directory: '/'
+    schedule:
+      interval: weekly
+      day: monday
+      time: '06:00'
+      timezone: Europe/Rome
+    groups:
+      minor-and-patch:
+        patterns: ['*']
+        update-types: [minor, patch]
+    commit-message:
+      prefix: 'chore(deps)'
+    open-pull-requests-limit: 5
+
+  - package-ecosystem: github-actions
+    directory: '/'
+    schedule:
+      interval: weekly
+      day: monday
+      time: '06:00'
+      timezone: Europe/Rome
+    commit-message:
+      prefix: 'chore(ci)'
