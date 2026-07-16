@@ -6,6 +6,7 @@ import { parseArgs } from 'node:util';
 import * as p from '@clack/prompts';
 
 import { ClerkCli, ClerkError, type ClerkApp } from './clerk.js';
+import { GhError, GitHubPublisher } from './github.js';
 import {
   ConfigError,
   validateMethods,
@@ -16,12 +17,19 @@ import {
   CLERK_SECRET_NAMES,
   InfisicalClient,
   InfisicalError,
+  PROD_SLUG,
   buildSecretPlan,
   extractClerkKeys,
   readInfisicalCoordinates,
 } from './infisical.js';
 import { AUTH_METHODS, buildPatch, methodLabel, type AuthMethod } from './methods.js';
-import { ensureEmptyTarget, initGitRepo, planScaffold, writeScaffold } from './scaffold.js';
+import {
+  detectExistingScaffold,
+  ensureEmptyTarget,
+  initGitRepo,
+  planScaffold,
+  writeScaffold,
+} from './scaffold.js';
 
 const HELP = `pier — the gangway your users board through
 
@@ -31,6 +39,7 @@ Options:
   --name <project>      Fleet project name (Clerk application and app repo take it)
   --methods <list>      Comma-separated: ${AUTH_METHODS.join(', ')}
   --dir <path>          Where to scaffold the app repo (default: ./<project>)
+  --skip-github         Do not create/push the GitHub repo (Phase D)
   --dry-run             Show what would happen without calling Clerk
   --yes                 Accept defaults, fail instead of prompting
   -h, --help            Show this help
@@ -42,6 +51,9 @@ Credentials:
                            keel's machine identity — enables the secrets push.
   INFISICAL_PROJECT_ID / INFISICAL_HOST
                            Optional; default is find-by-name on app.infisical.com.
+  SCW_SECRET_KEY / SCW_REGION
+                           Optional (same shell keel ran in): lets Phase D give the
+                           app repo its image-push credential and wiring.
 
 Phases A + B + C: creates the Clerk application, enables the chosen auth
 methods, pushes the keys to the Infisical project keel provisioned (dev
@@ -56,6 +68,7 @@ async function main(): Promise<void> {
       name: { type: 'string' },
       methods: { type: 'string' },
       dir: { type: 'string' },
+      'skip-github': { type: 'boolean', default: false },
       'dry-run': { type: 'boolean', default: false },
       yes: { type: 'boolean', default: false },
       help: { type: 'boolean', short: 'h', default: false },
@@ -96,14 +109,20 @@ async function main(): Promise<void> {
     const files = Object.keys(planScaffold(projectName));
     p.log.info(
       `Would then scaffold the app repo (${files.length} files) into ${targetDir}, ` +
-        'pull the dev keys into its gitignored .env.local, and git-init it.',
+        'pull the dev keys into its gitignored .env.local, git-init it, and ' +
+        (values['skip-github']
+          ? 'stop there (--skip-github).'
+          : 'publish it to GitHub with its image-push CI wiring.'),
     );
     p.outro('Nothing was called.');
     return;
   }
 
-  // Fail on a dirty target before anything is created on Clerk's side.
-  await ensureEmptyTarget(targetDir);
+  // A previous pier run of the same project is welcome (idempotent re-run,
+  // e.g. after keel's first apply materialized APP_URL); anything else in
+  // the way fails before Clerk is touched.
+  const existingScaffold = await detectExistingScaffold(targetDir, projectName);
+  if (!existingScaffold) await ensureEmptyTarget(targetDir);
 
   const platformKey = validatePlatformKey(process.env.CLERK_PLATFORM_API_KEY);
 
@@ -170,13 +189,17 @@ async function main(): Promise<void> {
     p.log.warn(`App ${app.id} is ready, but no auth method could be applied — see above.`);
   }
 
-  const files = planScaffold(projectName);
-  await step(
-    spin,
-    `Scaffolding the app repo in ${targetDir}`,
-    `App repo scaffolded (${Object.keys(files).length} files)`,
-    () => writeScaffold(targetDir, files),
-  );
+  if (existingScaffold) {
+    p.log.info(`Existing pier scaffold found in ${targetDir} — files left untouched.`);
+  } else {
+    const files = planScaffold(projectName);
+    await step(
+      spin,
+      `Scaffolding the app repo in ${targetDir}`,
+      `App repo scaffolded (${Object.keys(files).length} files)`,
+      () => writeScaffold(targetDir, files),
+    );
+  }
 
   const envLocal = join(targetDir, '.env.local');
   let keysPulled = true;
@@ -194,7 +217,10 @@ async function main(): Promise<void> {
   }
 
   // Phase B — the keys' real home is the Infisical project keel provisioned;
-  // .env.local is only the local-dev convenience copy.
+  // .env.local is only the local-dev convenience copy. Along the way, pick
+  // up the APP_URL keel's pipeline synced for each non-prod environment.
+  let nonProdEnvs: string[] | undefined;
+  let appUrls: string[] = [];
   if (!infisical) {
     p.log.info(
       'Infisical push skipped — export INFISICAL_CLIENT_ID / INFISICAL_CLIENT_SECRET ' +
@@ -204,7 +230,7 @@ async function main(): Promise<void> {
     p.log.warn('Skipping the Infisical push: the Clerk keys were not pulled (see above).');
   } else {
     try {
-      await step(
+      const result = await step(
         spin,
         'Pushing the Clerk keys to Infisical',
         (r: { created: number; kept: number }) =>
@@ -223,9 +249,17 @@ async function main(): Promise<void> {
             if ((await client.pushSecret(project.id, push)) === 'created') created += 1;
             else kept += 1;
           }
-          return { created, kept };
+          const envs = project.environments.filter((slug) => slug !== PROD_SLUG);
+          const urls: string[] = [];
+          for (const env of envs) {
+            const url = await client.getSecret(project.id, env, 'APP_URL');
+            if (url && /^https?:\/\//.test(url)) urls.push(url);
+          }
+          return { created, kept, envs, urls };
         },
       );
+      nonProdEnvs = result.envs;
+      appUrls = result.urls;
     } catch (error) {
       if (!(error instanceof InfisicalError)) throw error;
       p.log.warn(
@@ -235,16 +269,83 @@ async function main(): Promise<void> {
     }
   }
 
-  if (await initGitRepo(targetDir)) {
-    p.log.info('Git repository initialized with a first commit.');
+  // Phase A′ — the deployed keel URLs must be allowed origins on the dev
+  // instance before its keys work from them. APP_URL is real only after
+  // keel's first apply; until then this re-runs cleanly later.
+  if (appUrls.length > 0) {
+    try {
+      const origins = [...new Set(['http://localhost:3000', ...appUrls])];
+      await step(
+        spin,
+        'Setting Clerk allowed origins',
+        `Allowed origins: ${origins.join(', ')}`,
+        () => clerk.setAllowedOrigins(app.id, origins),
+      );
+    } catch (error) {
+      if (!(error instanceof ClerkError)) throw error;
+      p.log.warn(`Could not set the allowed origins (${error.message}) — re-run pier to retry.`);
+    }
   } else {
-    p.log.warn('Could not git-init the repo (no git, or no git identity) — commit it yourself.');
+    p.log.info(
+      'No APP_URL in Infisical yet (keel not applied, or push skipped): allowed origins ' +
+        'unchanged. Re-run pier after the first keel apply to register the deployed URLs.',
+    );
+  }
+
+  let gitReady = existingScaffold;
+  if (!existingScaffold) {
+    gitReady = await initGitRepo(targetDir);
+    if (gitReady) {
+      p.log.info('Git repository initialized with a first commit.');
+    } else {
+      p.log.warn('Could not git-init the repo (no git, or no git identity) — commit it yourself.');
+    }
+  }
+
+  // Phase D — hand the repo over to GitHub and wire its image-push CI.
+  if (values['skip-github']) {
+    p.log.info('GitHub publish skipped (--skip-github).');
+  } else if (!gitReady) {
+    p.log.warn('Skipping the GitHub publish: the repo has no commit yet.');
+  } else {
+    try {
+      const publisher = new GitHubPublisher();
+      const repoUrl = await step(
+        spin,
+        'Publishing to GitHub (private repo)',
+        (url) => `On GitHub: ${url}`,
+        () => publisher.publish(targetDir, projectName),
+      );
+      void repoUrl;
+      const region = process.env.SCW_REGION?.trim() || 'fr-par';
+      await publisher.setVariable(targetDir, 'SCW_REGION', region);
+      await publisher.setVariable(targetDir, 'PROJECT_NAME', projectName);
+      if (nonProdEnvs && nonProdEnvs.length > 0) {
+        await publisher.setVariable(targetDir, 'KEEL_NON_PROD_ENVIRONMENTS', nonProdEnvs.join(' '));
+      }
+      const scwSecretKey = process.env.SCW_SECRET_KEY?.trim();
+      if (scwSecretKey) {
+        await publisher.setSecret(targetDir, 'SCW_SECRET_KEY', scwSecretKey);
+        p.log.info('Image-push CI configured (SCW_SECRET_KEY secret + registry variables).');
+      } else {
+        p.log.warn(
+          'SCW_SECRET_KEY not in this shell — CI will build the image but skip the registry ' +
+            `push until you run: gh secret set SCW_SECRET_KEY (in ${targetDir}).`,
+        );
+      }
+    } catch (error) {
+      if (!(error instanceof GhError)) throw error;
+      p.log.warn(
+        `GitHub publish incomplete (${error.message}). Manual path: ` +
+          `cd ${targetDir} && gh repo create ${projectName} --private --source . --push`,
+      );
+    }
   }
 
   p.outro(
     `Done. Your app repo is ready:\n` +
       `  cd ${targetDir} && npm install && npm run dev\n` +
-      'Next up (not built yet): GitHub handoff.',
+      'Deploy: merge to main pushes the image; set container_image in the keel tfvars.',
   );
 }
 
@@ -261,7 +362,8 @@ async function step<T>(
     spin.stop(typeof done === 'function' ? done(result) : done);
     return result;
   } catch (error) {
-    spin.stop(`${start} — failed`, 1);
+    // clack v1: dedicated error state instead of stop(message, code).
+    spin.error(`${start} — failed`);
     throw error;
   }
 }

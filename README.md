@@ -86,8 +86,14 @@ targets the **app** repo, not keel's infrastructure repo.
   user through the app-owned seam, `appearance` wired to a theme placeholder, and a
   gitignored `.env.local` filled by `clerk env pull`. The repo is git-initialized with a
   first commit. Pier itself is not a dependency of the result.
-- **D — Handoff.** Push the repo to GitHub, print the one-time Google Console checklist
-  (only if production Google is wanted), and exit.
+- **D — Handoff (GitHub).** Create the private app repo and push (`gh`), then wire its
+  image-push CI: the `SCW_SECRET_KEY` secret (from the same shell keel ran in) plus the
+  `SCW_REGION` / `PROJECT_NAME` / `KEEL_NON_PROD_ENVIRONMENTS` variables. The generated
+  CI builds **one portable image** (dummy publishable key at build; real `CLERK_*` keys
+  are injected at runtime by keel from Infisical), listening on 8080 (keel's
+  `container_port` default): merge to main pushes it to every non-prod environment
+  registry, a `vX.Y.Z` tag pushes to prod's — deploying stays a reviewable
+  `container_image` change in the infrastructure repo, keel's own contract.
 
 The only human input Pier needs beyond keel's inheritance: a Clerk CLI login (once), the
 choice of auth methods, and — for production Google only — a Google OAuth client.
@@ -118,15 +124,25 @@ production is a version tag.
 
 ## Status
 
-Phases A, B and C work:
+All four phases work — after keel, one pier run hands you a deployable app:
 `npx github:Gambi97/pier --name <project> --methods google,password,magic-link,email-otp`
-creates the Clerk application, enables the chosen methods, pushes the keys to keel's
-Infisical project (when the `INFISICAL_*` coordinates are exported; skipped loudly
-otherwise), scaffolds the DDD-layered Next.js app repo (`--dir` to choose where; the
-target must be new or empty), pulls the dev keys into its gitignored `.env.local`, and
-git-inits it with a first commit. Phases A and C are verified end-to-end against a real
-Clerk account; Phase B's driver mirrors keel's (same endpoints, same payloads) and is
-pinned by tests against that convention.
+creates the Clerk application, enables the chosen methods (and points Clerk's `paths` at
+the scaffold routes), pushes the keys to keel's Infisical project (when the `INFISICAL_*`
+coordinates are exported; skipped loudly otherwise), registers the deployed `APP_URL`s as
+allowed origins on the dev instance, scaffolds the containerized DDD Next.js repo
+(`--dir` to choose where; the target must be new or empty), pulls the dev keys into its
+gitignored `.env.local`, git-inits it, and publishes it to GitHub with its image-push CI
+configured (`--skip-github` to stop before that).
+
+Re-runs are idempotent end to end: the Clerk app is reused by name, an existing pier
+scaffold is recognized and left untouched, the Infisical push never overwrites, and the
+allowed origins converge — so "run pier again after keel's first apply" is the designed
+way to pick up the freshly synced `APP_URL`s.
+
+Phases A and C are verified end-to-end against a real Clerk account (including a real
+`next build` of the generated repo and a standalone-server run proving the runtime key
+injection); Phase B's driver mirrors keel's (same endpoints, same payloads) and Phase D
+shells out to `gh`, both pinned by tests.
 
 Phase A's config shape is pinned against the live schema (`platform-config/2025-01-01`):
 Google is a connection toggle, password is its own `auth_password` key, and magic link /
@@ -148,7 +164,9 @@ and changing auth config live on Clerk's account-plane Platform API):
 - `CLERK_PLATFORM_API_KEY` (`ak_...`) — fully headless, right for CI.
 - `npx clerk auth login` once — Pier then rides the stored OAuth token.
 
-Phase D (GitHub handoff) is next, on demand.
+What deliberately stays manual: the production Clerk instance (your own Google OAuth
+client + DNS, then replace the `prod` placeholders in Infisical) and the deploy itself
+(setting `container_image` in the keel tfvars — a reviewable PR, by design).
 
 ## License
 

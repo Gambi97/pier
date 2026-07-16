@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process';
-import { mkdir, readdir, stat, writeFile } from 'node:fs/promises';
+import { mkdir, readdir, readFile, stat, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 
 import { ConfigError } from './config.js';
@@ -25,6 +25,9 @@ export function planScaffold(projectName: string): Record<string, string> {
     'package.json': packageJson(projectName),
     'tsconfig.json': TSCONFIG,
     'next.config.ts': NEXT_CONFIG,
+    Dockerfile: DOCKERFILE,
+    '.dockerignore': DOCKERIGNORE,
+    '.github/workflows/ci.yml': APP_CI,
     '.gitignore': GITIGNORE,
     '.env.example': ENV_EXAMPLE,
     '.env.local': ENV_LOCAL,
@@ -61,6 +64,26 @@ export async function ensureEmptyTarget(dir: string): Promise<void> {
       `Target directory "${dir}" is not empty. Pier only scaffolds into a new or empty ` +
         'directory — pick another with --dir.',
     );
+  }
+}
+
+/**
+ * True when the target already holds this project's pier scaffold — the
+ * signature is the package name plus the proxy file. Makes re-runs fully
+ * idempotent: pier skips the write and continues with the phases that are
+ * additive by design (env pull merges, Infisical never overwrites, allowed
+ * origins converge), which is exactly what "run pier again after keel's
+ * first apply" needs.
+ */
+export async function detectExistingScaffold(dir: string, projectName: string): Promise<boolean> {
+  try {
+    const pkg = JSON.parse(await readFile(join(dir, 'package.json'), 'utf8')) as {
+      name?: string;
+    };
+    await stat(join(dir, 'src/proxy.ts'));
+    return pkg.name === projectName;
+  } catch {
+    return false;
   }
 }
 
@@ -164,9 +187,59 @@ const TSCONFIG =
 
 const NEXT_CONFIG = `import type { NextConfig } from 'next';
 
-const nextConfig: NextConfig = {};
+const nextConfig: NextConfig = {
+  // Self-contained server bundle: the Dockerfile copies .next/standalone and
+  // runs server.js directly — no node_modules in the runtime image.
+  output: 'standalone',
+};
 
 export default nextConfig;
+`;
+
+/**
+ * One portable image for every environment. The build uses a well-formed
+ * dummy publishable key (prerendering needs one that parses); the real keys
+ * are injected at runtime — keel reads them from Infisical and sets them as
+ * secret env vars on the container, and ClerkProvider picks the publishable
+ * key up per-request (see layout.tsx). PORT=8080 matches keel's
+ * container_port default, so no tfvars change is needed.
+ */
+const DOCKERFILE = `# syntax=docker/dockerfile:1
+
+FROM node:24-alpine AS deps
+WORKDIR /app
+COPY package.json package-lock.json* ./
+RUN npm ci
+
+FROM node:24-alpine AS build
+WORKDIR /app
+COPY --from=deps /app/node_modules ./node_modules
+COPY . .
+# Well-formed but fake (base64 of clerk.example.com$): next build needs a key
+# that parses, never a real one. Real keys arrive at runtime from Infisical.
+ARG NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY=pk_test_Y2xlcmsuZXhhbXBsZS5jb20k
+RUN npm run build
+
+FROM node:24-alpine AS runtime
+WORKDIR /app
+ENV NODE_ENV=production
+# keel's container_port default; Next's standalone server honors PORT.
+ENV PORT=8080
+ENV HOSTNAME=0.0.0.0
+RUN addgroup -S app && adduser -S app -G app
+COPY --from=build --chown=app:app /app/.next/standalone ./
+COPY --from=build --chown=app:app /app/.next/static ./.next/static
+USER app
+EXPOSE 8080
+CMD ["node", "server.js"]
+`;
+
+const DOCKERIGNORE = `node_modules
+.next
+.git
+.env*
+!.env.example
+README.md
 `;
 
 const GITIGNORE = `node_modules/
@@ -300,7 +373,18 @@ export default function RootLayout({ children }: { children: ReactNode }) {
   return (
     <html lang="en">
       <body>
-        <ClerkProvider appearance={appearance}>{children}</ClerkProvider>
+        {/*
+          publishableKey is read per-request (not inlined at build), so one
+          image serves every environment: keel injects the real key from
+          Infisical at runtime, and the build only ever sees a dummy.
+        */}
+        <ClerkProvider
+          dynamic
+          publishableKey={process.env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY}
+          appearance={appearance}
+        >
+          {children}
+        </ClerkProvider>
       </body>
     </html>
   );
@@ -416,6 +500,74 @@ export default async function DashboardPage() {
 }
 `;
 
+/**
+ * The generated app's pipeline, wired to keel's deploy contract: merge to
+ * main builds one image and pushes it to every non-production environment's
+ * registry; a vX.Y.Z tag pushes to prod's. Deploying stays a reviewable
+ * tfvars change in the infrastructure repo (keel's own step 3). Pushes gate
+ * themselves on the SCW_SECRET_KEY secret, so the pipeline degrades to
+ * build-only until Phase D (or the user) configures the repo.
+ */
+const APP_CI = `name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*.*.*']
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck
+      - name: Build (dummy publishable key — real keys are runtime-injected)
+        env:
+          NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY: pk_test_Y2xlcmsuZXhhbXBsZS5jb20k
+        run: npm run build
+
+  image:
+    needs: verify
+    runs-on: ubuntu-latest
+    env:
+      SCW_SECRET_KEY: \${{ secrets.SCW_SECRET_KEY }}
+    steps:
+      - uses: actions/checkout@v5
+      - name: Build the image
+        run: docker build -t app:local .
+      - name: Push to the keel environment registries
+        if: github.event_name == 'push' && env.SCW_SECRET_KEY != ''
+        env:
+          REGISTRY_HOST: rg.\${{ vars.SCW_REGION }}.scw.cloud
+          PROJECT_NAME: \${{ vars.PROJECT_NAME }}
+          NON_PROD_ENVS: \${{ vars.KEEL_NON_PROD_ENVIRONMENTS }}
+        run: |
+          set -euo pipefail
+          if [ "\${GITHUB_REF_TYPE}" = "tag" ]; then
+            envs="prod"
+            tag="\${GITHUB_REF_NAME}"
+          else
+            envs="\${NON_PROD_ENVS}"
+            tag="main-\${GITHUB_SHA::7}"
+          fi
+          echo "\${SCW_SECRET_KEY}" | docker login "\${REGISTRY_HOST}" -u nologin --password-stdin
+          for env in \${envs}; do
+            ref="\${REGISTRY_HOST}/\${PROJECT_NAME}-\${env}/app:\${tag}"
+            docker tag app:local "\${ref}"
+            docker push "\${ref}"
+            echo "::notice::Pushed \${ref} — set container_image in \${env}.tfvars to deploy it."
+          done
+`;
+
 function readme(projectName: string): string {
   return `# ${projectName}
 
@@ -456,5 +608,25 @@ the contract.
   \`src/app/theme.ts\`.
 - \`/dashboard\` — example protected route; add more to the matcher in
   \`src/proxy.ts\`.
+
+## Deploy (keel)
+
+One portable image serves every environment: the build uses a dummy
+publishable key, the real \`CLERK_*\` keys are injected at runtime by keel
+from Infisical (pier put them there). The image listens on 8080, keel's
+\`container_port\` default.
+
+- **Merge to main** → CI builds the image and pushes
+  \`rg.<region>.scw.cloud/<project>-<env>/app:main-<sha>\` to every
+  non-production environment registry.
+- **Tag \`vX.Y.Z\`** → CI pushes \`<project>-prod/app:vX.Y.Z\`.
+- **Deploying** stays a reviewable change in the infrastructure repo: set
+  \`container_image\` in \`<env>.tfvars\` to the pushed ref (the CI run
+  prints it) and merge.
+
+The push needs the \`SCW_SECRET_KEY\` repo secret plus the \`SCW_REGION\`,
+\`PROJECT_NAME\` and \`KEEL_NON_PROD_ENVIRONMENTS\` variables — pier sets
+them at bootstrap when it can; until then CI still builds the image and
+skips the push.
 `;
 }

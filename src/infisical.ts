@@ -27,7 +27,7 @@ export class InfisicalError extends Error {}
 export const INFISICAL_DEFAULT_HOST = 'https://app.infisical.com';
 
 /** keel's production slug; every other environment is non-production. */
-const PROD_SLUG = 'prod';
+export const PROD_SLUG = 'prod';
 
 export const PROD_PLACEHOLDER = 'placeholder-set-after-clerk-production-setup';
 
@@ -201,6 +201,26 @@ export class InfisicalClient {
       id: project.id,
       environments: (project.environments ?? []).map((e) => e.slug),
     };
+  }
+
+  /**
+   * Reads one secret's value; absent (or unreadable) resolves to undefined
+   * — used to pick up the APP_URL keel's pipeline syncs after each apply.
+   */
+  async getSecret(
+    projectId: string,
+    environment: string,
+    name: string,
+  ): Promise<string | undefined> {
+    const query = `workspaceId=${projectId}&environment=${environment}&secretPath=/`;
+    const { status, data } = await this.api<{ secret?: { secretValue?: string } }>(
+      `/api/v3/secrets/raw/${name}?${query}`,
+    );
+    if (status === 200) return data.secret?.secretValue;
+    if (status === 400 || status === 404) return undefined;
+    throw new InfisicalError(
+      `Could not read ${name} from "${environment}" (HTTP ${status}${data.message ? `: ${data.message}` : ''}).`,
+    );
   }
 
   /**

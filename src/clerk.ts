@@ -186,6 +186,25 @@ export class ClerkCli {
   async envPull(appId: string, file: string): Promise<void> {
     await this.exec(['env', 'pull', '--app', appId, '--file', file]);
   }
+
+  /**
+   * Allowed origins live on the instance (Backend API PATCH /instance),
+   * not in the platform config document — the deployed keel URLs must be
+   * listed there before the dev-instance keys work from them.
+   */
+  async setAllowedOrigins(appId: string, origins: string[]): Promise<void> {
+    await this.exec([
+      'api',
+      '/instance',
+      '-X',
+      'PATCH',
+      '-d',
+      JSON.stringify({ allowed_origins: origins }),
+      '--app',
+      appId,
+      '--yes',
+    ]);
+  }
 }
 
 /**

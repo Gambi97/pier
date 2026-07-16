@@ -101,6 +101,20 @@ describe('ClerkCli', () => {
     expect(apps).toEqual([{ id: 'app_123', name: 'pizza', devPublishableKey: 'pk_test_abc' }]);
   });
 
+  it('patches allowed origins on the instance via the Backend API', async () => {
+    const { runner, calls } = fakeRunner({ 'api /instance': ok('{}') });
+    await new ClerkCli('ak_x', runner).setAllowedOrigins('app_123', [
+      'http://localhost:3000',
+      'https://dev.example.com',
+    ]);
+    const args = calls[0]!;
+    expect(args).toContain('PATCH');
+    expect(args).toContain('--yes');
+    expect(args).toContain(
+      JSON.stringify({ allowed_origins: ['http://localhost:3000', 'https://dev.example.com'] }),
+    );
+  });
+
   it('passes the platform key through the env only when given', async () => {
     const withKey = fakeRunner({ 'apps list': ok('[]') });
     await new ClerkCli('ak_x', withKey.runner).listApps();

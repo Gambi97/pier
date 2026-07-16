@@ -70,4 +70,11 @@ describe('buildPatch', () => {
     expect(plan.dropped).toEqual([...AUTH_METHODS]);
     expect(plan.patch).toEqual({});
   });
+
+  it("points Clerk's paths at the scaffold routes when the schema has them", () => {
+    const plan = buildPatch(['password'], [...LIVE_SCHEMA, 'paths']);
+    expect(plan.patch.paths).toEqual({ home: '/', sign_in: '/sign-in', sign_up: '/sign-up' });
+    // And silently skips them on a schema that lacks the key.
+    expect(buildPatch(['password'], LIVE_SCHEMA).patch.paths).toBeUndefined();
+  });
 });

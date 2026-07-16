@@ -102,5 +102,11 @@ export function buildPatch(methods: AuthMethod[], schemaKeys: string[]): PatchPl
     }
   }
 
+  // Not an auth method but part of the same patch: point Clerk's hosted
+  // flows at the routes the scaffold creates. Schema-guarded like the rest.
+  if (known.has('paths')) {
+    patch.paths = { home: '/', sign_in: '/sign-in', sign_up: '/sign-up' };
+  }
+
   return { patch, dropped, warnings };
 }

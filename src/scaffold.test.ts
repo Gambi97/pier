@@ -5,7 +5,12 @@ import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
 import { ConfigError } from './config.js';
-import { ensureEmptyTarget, planScaffold, writeScaffold } from './scaffold.js';
+import {
+  detectExistingScaffold,
+  ensureEmptyTarget,
+  planScaffold,
+  writeScaffold,
+} from './scaffold.js';
 
 const FILES = planScaffold('pizza');
 
@@ -64,9 +69,34 @@ describe('planScaffold', () => {
     const gitignore = FILES['.gitignore']!;
     expect(gitignore).toContain('.env*');
     expect(gitignore).toContain('!.env.example');
+    // The documented dummy build key (base64 of clerk.example.com$) is the
+    // one allowed exception — anything else key-shaped is a leak.
+    const DUMMY = 'pk_test_Y2xlcmsuZXhhbXBsZS5jb20k';
     for (const [path, content] of Object.entries(FILES)) {
-      expect(/(pk|sk|ak)_(test|live)?_?[A-Za-z0-9]{8,}/.test(content), path).toBe(false);
+      const scrubbed = content.replaceAll(DUMMY, '');
+      expect(/(pk|sk|ak)_(test|live)?_?[A-Za-z0-9]{8,}/.test(scrubbed), path).toBe(false);
     }
+  });
+
+  it('ships a portable image: standalone output, port 8080, runtime keys', () => {
+    expect(FILES['next.config.ts']).toContain("output: 'standalone'");
+    const dockerfile = FILES['Dockerfile']!;
+    expect(dockerfile).toContain('ENV PORT=8080');
+    expect(dockerfile).toContain('CMD ["node", "server.js"]');
+    // The publishable key must NOT be baked in as a real build requirement:
+    // the layout reads it per-request instead.
+    expect(FILES['src/app/layout.tsx']).toContain(
+      'publishableKey={process.env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY}',
+    );
+  });
+
+  it("wires the app CI to keel's registry contract", () => {
+    const ci = FILES['.github/workflows/ci.yml']!;
+    expect(ci).toContain('docker login "${REGISTRY_HOST}" -u nologin');
+    expect(ci).toContain('${PROJECT_NAME}-${env}/app:${tag}');
+    expect(ci).toContain("tags: ['v*.*.*']");
+    // Push degrades to build-only until the secret exists.
+    expect(ci).toContain("env.SCW_SECRET_KEY != ''");
   });
 
   it('protects /dashboard in the proxy and names the project in the pages', () => {
@@ -88,6 +118,15 @@ describe('writeScaffold', () => {
       'utf8',
     );
     expect(adapter).toContain('@clerk/nextjs/server');
+  });
+
+  it('recognizes its own scaffold for idempotent re-runs', async () => {
+    const base = await mkdtemp(join(tmpdir(), 'pier-rerun-'));
+    const dir = join(base, 'app');
+    await writeScaffold(dir, FILES);
+    expect(await detectExistingScaffold(dir, 'pizza')).toBe(true);
+    expect(await detectExistingScaffold(dir, 'other-project')).toBe(false);
+    expect(await detectExistingScaffold(join(base, 'missing'), 'pizza')).toBe(false);
   });
 
   it('accepts an existing empty directory and refuses a non-empty one', async () => {

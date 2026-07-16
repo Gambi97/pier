@@ -183,6 +183,28 @@ describe('InfisicalClient', () => {
     );
   });
 
+  it('reads a secret value and treats an absent one as undefined', async () => {
+    const hit = fakeFetch({
+      ...LOGIN_OK,
+      '/api/v3/secrets/raw/APP_URL': {
+        status: 200,
+        body: { secret: { secretValue: 'https://dev.example.com' } },
+      },
+    });
+    const client = new InfisicalClient(COORDS, hit.fetcher);
+    expect(await client.getSecret('pid-1', 'dev', 'APP_URL')).toBe('https://dev.example.com');
+    const url = hit.calls.find((c) => c.url.includes('APP_URL'))!.url;
+    expect(url).toContain('workspaceId=pid-1');
+    expect(url).toContain('environment=dev');
+
+    const miss = fakeFetch({
+      ...LOGIN_OK,
+      '/api/v3/secrets/raw/APP_URL': { status: 404, body: { message: 'not found' } },
+    });
+    const client2 = new InfisicalClient(COORDS, miss.fetcher);
+    expect(await client2.getSecret('pid-1', 'dev', 'APP_URL')).toBeUndefined();
+  });
+
   it('surfaces any other failure as a typed error', async () => {
     const { fetcher } = fakeFetch({
       ...LOGIN_OK,
