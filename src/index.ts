@@ -23,8 +23,9 @@ Options:
   --yes                 Accept defaults, fail instead of prompting
   -h, --help            Show this help
 
-Environment:
-  CLERK_PLATFORM_API_KEY   Platform API key (ak_...), the only credential Pier needs.
+Credentials (either one):
+  CLERK_PLATFORM_API_KEY   Platform API key (ak_...) — fully headless, right for CI.
+  clerk auth login         One-time browser OAuth; Pier then uses the stored token.
 
 Phase A only for now: creates the Clerk application and enables the chosen
 auth methods. Secrets push (Infisical) and the Next.js scaffold are next.
@@ -67,26 +68,33 @@ async function main(): Promise<void> {
     return;
   }
 
-  const platformKey = validatePlatformKey(
-    process.env.CLERK_PLATFORM_API_KEY ??
-      (nonInteractive
-        ? missing('CLERK_PLATFORM_API_KEY')
-        : await askSecret('Clerk platform API key (ak_...)')),
-  );
+  const platformKey = validatePlatformKey(process.env.CLERK_PLATFORM_API_KEY);
 
   const clerk = new ClerkCli(platformKey);
   const spin = p.spinner();
 
-  spin.start('Validating the platform key');
-  await clerk.validateKey();
-  spin.stop('Platform key OK');
+  spin.start(platformKey ? 'Validating the platform key' : 'Checking the stored Clerk login');
+  try {
+    await clerk.validateKey();
+  } catch (error) {
+    if (error instanceof ClerkError && error.code === 'auth') {
+      spin.stop('Not authenticated', 1);
+      p.log.error(
+        'No Clerk credential found. Either export CLERK_PLATFORM_API_KEY (ak_...) ' +
+          'or run `npx clerk auth login` once, then re-run pier.',
+      );
+      process.exit(1);
+    }
+    throw error;
+  }
+  spin.stop('Clerk credential OK');
 
   spin.start(`Creating Clerk application "${projectName}"`);
   const app = await clerk.createApp(projectName);
   spin.stop(`Application created (${app.id})`);
 
   spin.start('Reading the instance config schema');
-  const schemaKeys = await clerk.schemaKeys();
+  const schemaKeys = await clerk.schemaKeys(app.id);
   const plan = buildPatch(methods, schemaKeys);
   spin.stop('Schema read');
 
@@ -116,12 +124,6 @@ function missing(what: string): never {
 
 async function askText(message: string): Promise<string> {
   const answer = await p.text({ message });
-  bailOnCancel(answer);
-  return answer as string;
-}
-
-async function askSecret(message: string): Promise<string> {
-  const answer = await p.password({ message });
   bailOnCancel(answer);
   return answer as string;
 }

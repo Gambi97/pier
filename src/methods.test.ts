@@ -2,33 +2,58 @@ import { describe, expect, it } from 'vitest';
 
 import { AUTH_METHODS, buildPatch } from './methods.js';
 
-const FULL_SCHEMA = ['connection_oauth_google', 'auth_email', 'session', 'sign_in'];
+// The top-level property names pinned live from `clerk config schema`
+// (platform-config/2025-01-01) on 2026-07-16.
+const LIVE_SCHEMA = ['connection_oauth_google', 'auth_password', 'auth_email', 'session'];
 
 describe('buildPatch', () => {
-  it('builds the google fragment against a schema that knows it', () => {
-    const plan = buildPatch(['google'], FULL_SCHEMA);
+  it('enables google as a connection toggle', () => {
+    const plan = buildPatch(['google'], LIVE_SCHEMA);
     expect(plan.patch).toEqual({ connection_oauth_google: { enabled: true } });
     expect(plan.dropped).toEqual([]);
   });
 
-  it('deep-merges the email family instead of overwriting', () => {
-    const plan = buildPatch(['password', 'magic-link', 'email-otp'], FULL_SCHEMA);
+  it('enables password under its own top-level key, with the verified-email base', () => {
+    const plan = buildPatch(['password'], LIVE_SCHEMA);
     expect(plan.patch).toEqual({
+      auth_password: { enabled: true },
       auth_email: {
-        enabled: true,
-        password: { enabled: true },
-        email_link: { enabled: true },
-        email_code: { enabled: true },
+        used_for_sign_up: true,
+        required_for_sign_up: true,
+        verify_at_sign_up: true,
+        verification_strategies: ['email_code'],
       },
     });
   });
 
-  it('drops methods whose key the live schema does not know, keeping the rest', () => {
-    const plan = buildPatch(['google', 'password'], ['auth_email']);
-    expect(plan.dropped).toEqual(['google']);
+  it('models magic link and OTP as one sign_in_strategies array, not merged toggles', () => {
+    const plan = buildPatch(['magic-link', 'email-otp'], LIVE_SCHEMA);
     expect(plan.patch).toEqual({
-      auth_email: { enabled: true, password: { enabled: true } },
+      auth_email: {
+        used_for_sign_up: true,
+        required_for_sign_up: true,
+        verify_at_sign_up: true,
+        verification_strategies: ['email_code'],
+        used_for_sign_in: true,
+        sign_in_strategies: ['email_code', 'email_link'],
+      },
     });
+  });
+
+  it('composes the full v1 selection', () => {
+    const plan = buildPatch([...AUTH_METHODS], LIVE_SCHEMA);
+    expect(plan.dropped).toEqual([]);
+    expect(Object.keys(plan.patch).sort()).toEqual([
+      'auth_email',
+      'auth_password',
+      'connection_oauth_google',
+    ]);
+  });
+
+  it('drops methods whose key the live schema does not know, keeping the rest', () => {
+    const plan = buildPatch(['google', 'password'], ['auth_password', 'auth_email']);
+    expect(plan.dropped).toEqual(['google']);
+    expect(plan.patch.auth_password).toEqual({ enabled: true });
   });
 
   it('drops everything against an empty schema without throwing', () => {

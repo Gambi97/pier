@@ -87,16 +87,22 @@ one way only: keel → Pier → app.
 
 ## Status
 
-Phase A is code: `npx pier --name <project> --methods google,password,magic-link,email-otp`
-creates the Clerk application and enables the chosen methods, fully headless. The only
-credential it needs is a **platform API key** (`ak_...`) in `CLERK_PLATFORM_API_KEY` —
-Clerk's account-plane key. An instance secret key (`sk_...`) is not enough: `apps create`
-and `config patch` live on the Platform API, which never accepts secret keys.
+Phase A works, verified end-to-end against a real Clerk account:
+`npx pier --name <project> --methods google,password,magic-link,email-otp` creates the
+Clerk application and enables the chosen methods, headless, then a `config pull` round
+trip confirms them. The config shape is pinned against the live schema
+(`platform-config/2025-01-01`): Google is a connection toggle, password is its own
+`auth_password` key, and magic link / email OTP are *strategies* in the
+`auth_email.sign_in_strategies` array. Pier still re-validates keys against the live
+schema on every run and drops unknown ones loudly.
 
-The email-family config keys are provisional until pinned against a live
-`clerk config schema` (Pier validates at runtime and drops unknown keys loudly rather
-than guessing). Phases B (Infisical secrets), C (Next.js scaffold) and D (handoff) are
-next, on demand.
+Credentials, either one (instance secret keys `sk_...` are never enough — creating apps
+and changing auth config live on Clerk's account-plane Platform API):
+
+- `CLERK_PLATFORM_API_KEY` (`ak_...`) — fully headless, right for CI.
+- `npx clerk auth login` once — Pier then rides the stored OAuth token.
+
+Phases B (Infisical secrets), C (Next.js scaffold) and D (handoff) are next, on demand.
 
 ## License
 

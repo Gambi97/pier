@@ -1,13 +1,21 @@
 /**
- * Auth methods Pier can enable, each mapped to the instance-config fragment
- * `clerk config patch` applies.
+ * Auth methods Pier can enable, mapped to Clerk's instance-config shape.
  *
- * Only `google` uses a key verified against Clerk's published examples
- * (`connection_oauth_google`). The email-based fragments follow the same
- * schema family but are still provisional: before patching, Pier pulls
- * `clerk config schema` and drops any fragment whose top-level key the
- * schema does not know, warning instead of guessing. First real run against
- * a platform key should pin them (see the live test in methods.test.ts).
+ * Pinned live against `clerk config schema` (draft 2020-12, id
+ * `platform-config/2025-01-01`) and verified end-to-end with a real
+ * `config patch` + `config pull` round trip:
+ *
+ * - Google is a connection: `connection_oauth_google.enabled`. In
+ *   development Clerk provides shared OAuth credentials (the schema says so
+ *   explicitly); production wants `client_id`/`client_secret`.
+ * - Password is its own top-level key: `auth_password.enabled`.
+ * - Magic link and email OTP are not toggles but *strategies* in the
+ *   `auth_email.sign_in_strategies` array (`email_link` / `email_code`), so
+ *   selecting both means a two-element array, not two merged objects.
+ *
+ * Before patching, Pier still validates the top-level keys it is about to
+ * write against the live schema and drops unknown ones loudly — the schema
+ * is versioned and can move again.
  */
 
 export type AuthMethod = 'google' | 'password' | 'magic-link' | 'email-otp';
@@ -19,38 +27,15 @@ export const AUTH_METHODS: readonly AuthMethod[] = [
   'email-otp',
 ];
 
-interface MethodSpec {
-  /** Top-level instance-config key the fragment lives under. */
-  key: string;
-  fragment: Record<string, unknown>;
-  label: string;
-}
-
-const SPECS: Record<AuthMethod, MethodSpec> = {
-  google: {
-    key: 'connection_oauth_google',
-    fragment: { connection_oauth_google: { enabled: true } },
-    label: 'Google (shared credentials on dev; bring your own client for prod)',
-  },
-  password: {
-    key: 'auth_email',
-    fragment: { auth_email: { enabled: true, password: { enabled: true } } },
-    label: 'Email + password',
-  },
-  'magic-link': {
-    key: 'auth_email',
-    fragment: { auth_email: { enabled: true, email_link: { enabled: true } } },
-    label: 'Magic link',
-  },
-  'email-otp': {
-    key: 'auth_email',
-    fragment: { auth_email: { enabled: true, email_code: { enabled: true } } },
-    label: 'Email OTP code',
-  },
+const LABELS: Record<AuthMethod, string> = {
+  google: 'Google (shared credentials on dev; bring your own client for prod)',
+  password: 'Email + password',
+  'magic-link': 'Magic link',
+  'email-otp': 'Email OTP code',
 };
 
 export function methodLabel(method: AuthMethod): string {
-  return SPECS[method].label;
+  return LABELS[method];
 }
 
 export interface PatchPlan {
@@ -60,40 +45,53 @@ export interface PatchPlan {
 }
 
 /**
- * Merge the selected methods into one PATCH payload, keeping only fragments
- * whose top-level key exists in the live schema. Fragments sharing a key
- * (the email family) deep-merge instead of overwriting each other.
+ * Build the PATCH payload for the selected methods, declaratively from the
+ * whole selection (the email strategies are one array, so this cannot be a
+ * per-method merge). `schemaKeys` are the top-level property names of the
+ * live config schema.
  */
 export function buildPatch(methods: AuthMethod[], schemaKeys: string[]): PatchPlan {
   const known = new Set(schemaKeys);
+  const selected = new Set(methods);
   const patch: Record<string, unknown> = {};
   const dropped: AuthMethod[] = [];
-  for (const method of methods) {
-    const spec = SPECS[method];
-    if (!known.has(spec.key)) {
-      dropped.push(method);
-      continue;
-    }
-    for (const [key, value] of Object.entries(spec.fragment)) {
-      const existing = patch[key];
-      patch[key] = isRecord(existing) && isRecord(value) ? deepMerge(existing, value) : value;
+
+  if (selected.has('google')) {
+    if (known.has('connection_oauth_google')) {
+      patch.connection_oauth_google = { enabled: true };
+    } else dropped.push('google');
+  }
+
+  if (selected.has('password')) {
+    if (known.has('auth_password')) {
+      patch.auth_password = { enabled: true };
+    } else dropped.push('password');
+  }
+
+  const strategies: string[] = [];
+  if (selected.has('email-otp')) strategies.push('email_code');
+  if (selected.has('magic-link')) strategies.push('email_link');
+
+  // The email block is needed for the passwordless strategies, and also as
+  // the verified-identifier base whenever password sign-up is on.
+  const needsEmail = strategies.length > 0 || selected.has('password');
+  if (needsEmail) {
+    if (known.has('auth_email')) {
+      patch.auth_email = {
+        used_for_sign_up: true,
+        required_for_sign_up: true,
+        verify_at_sign_up: true,
+        verification_strategies: ['email_code'],
+        ...(strategies.length > 0
+          ? { used_for_sign_in: true, sign_in_strategies: strategies }
+          : {}),
+      };
+    } else {
+      for (const m of ['magic-link', 'email-otp'] as const) {
+        if (selected.has(m)) dropped.push(m);
+      }
     }
   }
+
   return { patch, dropped };
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
-}
-
-function deepMerge(
-  base: Record<string, unknown>,
-  extra: Record<string, unknown>,
-): Record<string, unknown> {
-  const out = { ...base };
-  for (const [key, value] of Object.entries(extra)) {
-    const current = out[key];
-    out[key] = isRecord(current) && isRecord(value) ? deepMerge(current, value) : value;
-  }
-  return out;
 }

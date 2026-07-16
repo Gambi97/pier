@@ -24,13 +24,21 @@ export function validateProjectName(name: string): string {
   return trimmed;
 }
 
-export function validatePlatformKey(key: string): string {
-  const trimmed = key.trim();
+/**
+ * The platform key is optional: without one, the Clerk CLI falls back to
+ * the OAuth token a previous `clerk auth login` stored on this machine.
+ * When a key IS given it must be the account-plane `ak_` kind — a secret
+ * key (sk_...) authenticates a single instance and cannot create
+ * applications or change auth configuration.
+ */
+export function validatePlatformKey(key: string | undefined): string | undefined {
+  const trimmed = key?.trim();
+  if (!trimmed) return undefined;
   if (!trimmed.startsWith('ak_')) {
     throw new ConfigError(
       'The platform API key must start with "ak_". A secret key (sk_...) authenticates a single ' +
         'instance and cannot create applications or change auth configuration — create a ' +
-        'platform key in the Clerk Dashboard and pass that instead.',
+        'platform key in the Clerk Dashboard, or run `npx clerk auth login` once instead.',
     );
   }
   return trimmed;

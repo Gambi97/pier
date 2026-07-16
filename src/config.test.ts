@@ -25,6 +25,11 @@ describe('validatePlatformKey', () => {
     expect(validatePlatformKey(' ak_abc123 ')).toBe('ak_abc123');
   });
 
+  it('treats a missing key as "use the stored clerk auth login"', () => {
+    expect(validatePlatformKey(undefined)).toBeUndefined();
+    expect(validatePlatformKey('  ')).toBeUndefined();
+  });
+
   it('rejects secret keys with guidance', () => {
     expect(() => validatePlatformKey('sk_test_xyz')).toThrow(/platform key/i);
   });

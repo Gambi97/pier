@@ -52,21 +52,30 @@ export const spawnRunner: Runner = (args, env) =>
 export interface ClerkApp {
   id: string;
   name: string;
+  /** Publishable key of the development instance, when the API returned one. */
+  devPublishableKey?: string;
 }
 
 export class ClerkCli {
   private readonly run: Runner;
-  private readonly platformKey: string;
+  private readonly platformKey: string | undefined;
 
-  constructor(platformKey: string, run: Runner = spawnRunner) {
+  /**
+   * Platform-plane credential resolution mirrors the CLI's own order: an
+   * `ak_...` key when given (CI, fully headless), otherwise the OAuth token
+   * a previous `clerk auth login` stored on this machine. With neither,
+   * every call fails as a typed 'auth' error.
+   */
+  constructor(platformKey: string | undefined, run: Runner = spawnRunner) {
     this.platformKey = platformKey;
     this.run = run;
   }
 
   private async exec(args: string[]): Promise<string> {
-    const { status, stdout, stderr } = await this.run([...args, '--mode', 'agent'], {
-      CLERK_PLATFORM_API_KEY: this.platformKey,
-    });
+    const { status, stdout, stderr } = await this.run(
+      [...args, '--mode', 'agent'],
+      this.platformKey ? { CLERK_PLATFORM_API_KEY: this.platformKey } : {},
+    );
     if (status === 127) {
       throw new ClerkError(
         'not-installed',
@@ -81,10 +90,19 @@ export class ClerkCli {
     return stdout;
   }
 
+  /**
+   * Agent mode prefixes some JSON outputs with a human progress line
+   * ("Pulling config schema from ..."), so parse from the first brace or
+   * bracket instead of trusting the whole stream. Verified live.
+   */
   private async execJson<T>(args: string[]): Promise<T> {
     const raw = await this.exec(args);
+    const start = raw.search(/[[{]/);
+    if (start === -1) {
+      throw new ClerkError('api', `Unexpected non-JSON output from clerk ${args[0]}`);
+    }
     try {
-      return JSON.parse(raw) as T;
+      return JSON.parse(raw.slice(start)) as T;
     } catch {
       throw new ClerkError('api', `Unexpected non-JSON output from clerk ${args[0]}`);
     }
@@ -96,27 +114,49 @@ export class ClerkCli {
   }
 
   async createApp(name: string): Promise<ClerkApp> {
+    // Real payload shape (verified live): application_id + instances[],
+    // each instance carrying environment_type and publishable_key.
     const app = await this.execJson<{
-      id?: string;
+      application_id?: string;
       name?: string;
-      object?: string;
+      instances?: { instance_id: string; environment_type: string; publishable_key: string }[];
     }>(['apps', 'create', name, '--json']);
-    if (!app.id) throw new ClerkError('api', 'clerk apps create returned no application id');
-    return { id: app.id, name: app.name ?? name };
+    if (!app.application_id) {
+      throw new ClerkError('api', 'clerk apps create returned no application id');
+    }
+    const dev = app.instances?.find((i) => i.environment_type === 'development');
+    return {
+      id: app.application_id,
+      name: app.name ?? name,
+      devPublishableKey: dev?.publishable_key,
+    };
   }
 
   /**
-   * Top-level config keys the instance schema knows. Used to drop (loudly)
-   * any auth-method fragment whose key has drifted, instead of failing the
+   * Top-level property names of the instance config schema (a JSON Schema
+   * document: the keys live under `properties`). Used to drop (loudly) any
+   * auth-method fragment whose key has drifted, instead of failing the
    * whole patch or, worse, silently configuring nothing.
    */
-  async schemaKeys(): Promise<string[]> {
-    const schema = await this.execJson<Record<string, unknown>>(['config', 'schema']);
-    return Object.keys(schema);
+  async schemaKeys(appId: string): Promise<string[]> {
+    const schema = await this.execJson<{ properties?: Record<string, unknown> }>([
+      'config',
+      'schema',
+      '--app',
+      appId,
+    ]);
+    return Object.keys(schema.properties ?? {});
   }
 
   async pullConfig(appId: string): Promise<Record<string, unknown>> {
-    return this.execJson<Record<string, unknown>>(['config', 'pull', '--app', appId]);
+    // `config pull` wraps the document as {config_version, config: {...}}.
+    const pulled = await this.execJson<{ config?: Record<string, unknown> }>([
+      'config',
+      'pull',
+      '--app',
+      appId,
+    ]);
+    return pulled.config ?? (pulled as Record<string, unknown>);
   }
 
   async patchConfig(appId: string, patch: Record<string, unknown>): Promise<void> {
