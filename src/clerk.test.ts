@@ -93,14 +93,22 @@ describe('ClerkCli', () => {
     expect(args).toContain(JSON.stringify({ auth_password: { enabled: true } }));
   });
 
+  it('lists apps with the same payload shape as create, skipping malformed entries', async () => {
+    const { runner } = fakeRunner({
+      'apps list': ok(JSON.stringify([JSON.parse(CREATED), { name: 'no-id-here' }])),
+    });
+    const apps = await new ClerkCli('ak_x', runner).listApps();
+    expect(apps).toEqual([{ id: 'app_123', name: 'pizza', devPublishableKey: 'pk_test_abc' }]);
+  });
+
   it('passes the platform key through the env only when given', async () => {
     const withKey = fakeRunner({ 'apps list': ok('[]') });
-    await new ClerkCli('ak_x', withKey.runner).validateKey();
+    await new ClerkCli('ak_x', withKey.runner).listApps();
     expect(withKey.envs[0]).toEqual({ CLERK_PLATFORM_API_KEY: 'ak_x' });
 
     // Without a key the CLI falls back to the stored OAuth login.
     const withoutKey = fakeRunner({ 'apps list': ok('[]') });
-    await new ClerkCli(undefined, withoutKey.runner).validateKey();
+    await new ClerkCli(undefined, withoutKey.runner).listApps();
     expect(withoutKey.envs[0]).toEqual({});
   });
 
@@ -114,15 +122,31 @@ describe('ClerkCli', () => {
         stderr: '',
       },
     });
-    await expect(new ClerkCli(undefined, runner).validateKey()).rejects.toMatchObject({
+    await expect(new ClerkCli(undefined, runner).listApps()).rejects.toMatchObject({
       code: 'auth',
       message: 'Not authenticated',
     });
   });
 
+  it('extracts the error message even behind a human preamble line', async () => {
+    const { runner } = fakeRunner({
+      'apps list': {
+        status: 1,
+        stdout:
+          'Listing applications...\n' +
+          JSON.stringify({ error: { code: 'api_error', message: 'Rate limited' } }),
+        stderr: '',
+      },
+    });
+    await expect(new ClerkCli('ak_x', runner).listApps()).rejects.toMatchObject({
+      code: 'api',
+      message: 'Rate limited',
+    });
+  });
+
   it('maps a missing binary to not-installed', async () => {
     const runner: Runner = () => Promise.resolve({ status: 127, stdout: '', stderr: '' });
-    await expect(new ClerkCli('ak_x', runner).validateKey()).rejects.toMatchObject({
+    await expect(new ClerkCli('ak_x', runner).listApps()).rejects.toMatchObject({
       code: 'not-installed',
     });
   });

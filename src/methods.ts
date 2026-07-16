@@ -42,6 +42,8 @@ export interface PatchPlan {
   patch: Record<string, unknown>;
   /** Methods dropped because the live schema does not know their key. */
   dropped: AuthMethod[];
+  /** Degradations that are not full drops but the user must hear about. */
+  warnings: string[];
 }
 
 /**
@@ -55,6 +57,7 @@ export function buildPatch(methods: AuthMethod[], schemaKeys: string[]): PatchPl
   const selected = new Set(methods);
   const patch: Record<string, unknown> = {};
   const dropped: AuthMethod[] = [];
+  const warnings: string[] = [];
 
   if (selected.has('google')) {
     if (known.has('connection_oauth_google')) {
@@ -90,8 +93,14 @@ export function buildPatch(methods: AuthMethod[], schemaKeys: string[]): PatchPl
       for (const m of ['magic-link', 'email-otp'] as const) {
         if (selected.has(m)) dropped.push(m);
       }
+      if (selected.has('password') && 'auth_password' in patch) {
+        warnings.push(
+          'The live schema has no "auth_email" key, so password sign-up is enabled without ' +
+            'the verified-email base. Check email settings in the Clerk dashboard.',
+        );
+      }
     }
   }
 
-  return { patch, dropped };
+  return { patch, dropped, warnings };
 }

@@ -45,6 +45,12 @@ Adding a new framework means adding an adapter, never touching the core.
 - **First adapter: Next.js (TypeScript).** App Router, middleware-based route protection,
   Clerk's prebuilt components themed via the `appearance` API. Next produces the container
   image the infrastructure layer already expects.
+- **App repo shape: DDD-ready.** The repo Phase C scaffolds is laid out along DDD lines:
+  `src/domain` and `src/application` stay framework- and provider-free; Clerk touches only
+  the edges — `src/infrastructure/auth` (the provider adapter behind the env-var seam) and
+  the Next.js interface layer (`src/app/`, `src/proxy.ts`, the sign-in / sign-up pages).
+  Auth is a generic subdomain (opinion 3), so nothing provider-specific may leak into the
+  domain model: swapping Clerk for WorkOS must not touch `src/domain` or `src/application`.
 - **Auth methods (v1): Google, email + password, magic link, email OTP.** All on Clerk's
   free tier. In Clerk's **development** instance, Google works immediately with Clerk's
   shared credentials (no Google Cloud Console). A **production** instance needs your own
@@ -66,12 +72,20 @@ targets the **app** repo, not keel's infrastructure repo.
   keel's `APP_URL`, and injects production Google credentials if provided; keys are pulled
   with `clerk env pull`.
 - **B — Secrets (Infisical).** Push `NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY` and
-  `CLERK_SECRET_KEY` to the Infisical project keel provisioned. CI injects them into the
-  container; the repo holds none.
-- **C — App scaffold (Next.js).** Create the app repo (or scaffold into an existing one):
-  `<ClerkProvider>` in the root layout, `middleware.ts`, `/sign-in` and `/sign-up` pages,
-  an example protected route, `appearance` wired to a theme placeholder, and a gitignored
-  `.env.local` for local dev.
+  `CLERK_SECRET_KEY` into the **same Infisical project keel provisioned** — resolved by
+  `INFISICAL_PROJECT_ID` or by exact name, authenticated with keel's own machine identity
+  (`INFISICAL_CLIENT_ID` / `INFISICAL_CLIENT_SECRET`, `INFISICAL_HOST` optional). Dev
+  instance keys go to every non-production environment; `prod` gets keel-style
+  placeholders (the production Clerk instance needs its own Google client first). The
+  push is additive like keel's: an existing secret is never overwritten, so re-runs
+  cannot clobber a rotated key. CI injects them into the container; the repo holds none.
+  Pier never creates the project — keel owns it; missing project means "run keel first".
+- **C — App scaffold (Next.js).** Create the app repo in a new (or empty) directory:
+  `<ClerkProvider>` in the root layout, `src/proxy.ts` (Next 16's middleware) protecting
+  `/dashboard`, `/sign-in` and `/sign-up` pages, an example protected route reading the
+  user through the app-owned seam, `appearance` wired to a theme placeholder, and a
+  gitignored `.env.local` filled by `clerk env pull`. The repo is git-initialized with a
+  first commit. Pier itself is not a dependency of the result.
 - **D — Handoff.** Push the repo to GitHub, print the one-time Google Console checklist
   (only if production Google is wanted), and exit.
 
@@ -85,16 +99,48 @@ writes its secrets onto the same additive secret-store convention. keel creates 
 `<project>-infrastructure` repo; Pier creates the `<project>` app repo. Dependencies run
 one way only: keel → Pier → app.
 
+## CI & releases
+
+Same fleet convention keel set: branches open PRs, CI gates the merge to main, and
+production is a version tag.
+
+- **CI** (`ci.yml`) runs on every PR and push to main: build, lint, format, tests on
+  Node 22 + 24, a `--dry-run` CLI smoke, and a **scaffold job** that generates a demo
+  app and runs its real `next build` with a well-formed dummy publishable key. A weekly
+  cron re-runs it as a canary against the latest in-range Next/Clerk. The pipeline is
+  deliberately secret-free — the fleet's real keys live in Infisical only.
+- **Release** (`release.yml`): pushing a `vX.Y.Z` tag re-runs the full CI, checks the
+  tag against `package.json`, and cuts a GitHub Release, so `npx github:Gambi97/pier#vX.Y.Z`
+  pins a production version. npm publish (with provenance) activates only if an
+  `NPM_TOKEN` secret is ever configured.
+- **Dependabot** keeps npm dependencies (minor+patch grouped, weekly) and the pinned
+  GitHub Actions fresh.
+
 ## Status
 
-Phase A works, verified end-to-end against a real Clerk account:
-`npx pier --name <project> --methods google,password,magic-link,email-otp` creates the
-Clerk application and enables the chosen methods, headless, then a `config pull` round
-trip confirms them. The config shape is pinned against the live schema
-(`platform-config/2025-01-01`): Google is a connection toggle, password is its own
-`auth_password` key, and magic link / email OTP are *strategies* in the
-`auth_email.sign_in_strategies` array. Pier still re-validates keys against the live
-schema on every run and drops unknown ones loudly.
+Phases A, B and C work:
+`npx github:Gambi97/pier --name <project> --methods google,password,magic-link,email-otp`
+creates the Clerk application, enables the chosen methods, pushes the keys to keel's
+Infisical project (when the `INFISICAL_*` coordinates are exported; skipped loudly
+otherwise), scaffolds the DDD-layered Next.js app repo (`--dir` to choose where; the
+target must be new or empty), pulls the dev keys into its gitignored `.env.local`, and
+git-inits it with a first commit. Phases A and C are verified end-to-end against a real
+Clerk account; Phase B's driver mirrors keel's (same endpoints, same payloads) and is
+pinned by tests against that convention.
+
+Phase A's config shape is pinned against the live schema (`platform-config/2025-01-01`):
+Google is a connection toggle, password is its own `auth_password` key, and magic link /
+email OTP are _strategies_ in the `auth_email.sign_in_strategies` array. Pier still
+re-validates keys against the live schema on every run and drops unknown ones loudly.
+Re-runs are idempotent: an existing application carrying the fleet name is reused, never
+duplicated.
+
+Phase C is pinned against the live stack (Next 16.2, `@clerk/nextjs` 7.x — `proxy.ts`,
+async `auth()`, `<Show>` instead of `SignedIn/SignedOut`) and verified by `next build` on
+a freshly generated repo with real pulled keys. The DDD seam is enforced by tests:
+nothing under `src/domain` or `src/application` mentions the provider, provider imports
+live only in `src/infrastructure` and the interface layer, and `.env*` never reaches a
+commit.
 
 Credentials, either one (instance secret keys `sk_...` are never enough — creating apps
 and changing auth config live on Clerk's account-plane Platform API):
@@ -102,7 +148,7 @@ and changing auth config live on Clerk's account-plane Platform API):
 - `CLERK_PLATFORM_API_KEY` (`ak_...`) — fully headless, right for CI.
 - `npx clerk auth login` once — Pier then rides the stored OAuth token.
 
-Phases B (Infisical secrets), C (Next.js scaffold) and D (handoff) are next, on demand.
+Phase D (GitHub handoff) is next, on demand.
 
 ## License
 

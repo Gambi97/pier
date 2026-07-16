@@ -54,6 +54,15 @@ describe('buildPatch', () => {
     const plan = buildPatch(['google', 'password'], ['auth_password', 'auth_email']);
     expect(plan.dropped).toEqual(['google']);
     expect(plan.patch.auth_password).toEqual({ enabled: true });
+    expect(plan.warnings).toEqual([]);
+  });
+
+  it('warns (without dropping) when password loses its verified-email base', () => {
+    const plan = buildPatch(['password'], ['auth_password']);
+    expect(plan.dropped).toEqual([]);
+    expect(plan.patch).toEqual({ auth_password: { enabled: true } });
+    expect(plan.warnings).toHaveLength(1);
+    expect(plan.warnings[0]).toMatch(/auth_email/);
   });
 
   it('drops everything against an empty schema without throwing', () => {

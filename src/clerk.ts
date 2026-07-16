@@ -56,6 +56,22 @@ export interface ClerkApp {
   devPublishableKey?: string;
 }
 
+interface RawApp {
+  application_id?: string;
+  name?: string;
+  instances?: { instance_id: string; environment_type: string; publishable_key: string }[];
+}
+
+function toClerkApp(raw: RawApp, fallbackName?: string): ClerkApp | undefined {
+  if (!raw.application_id) return undefined;
+  const dev = raw.instances?.find((i) => i.environment_type === 'development');
+  return {
+    id: raw.application_id,
+    name: raw.name ?? fallbackName ?? '',
+    devPublishableKey: dev?.publishable_key,
+  };
+}
+
 export class ClerkCli {
   private readonly run: Runner;
   private readonly platformKey: string | undefined;
@@ -108,28 +124,27 @@ export class ClerkCli {
     }
   }
 
-  /** Cheap read-only credential check: lists apps, discards the result. */
-  async validateKey(): Promise<void> {
-    await this.exec(['apps', 'list', '--json']);
+  /**
+   * Lists the account's applications. Doubles as the read-only credential
+   * check (any auth problem surfaces as a typed 'auth' error) and as the
+   * duplicate-name lookup that keeps re-runs idempotent after a partial
+   * failure. Each entry has the same shape as `apps create` (verified live).
+   */
+  async listApps(): Promise<ClerkApp[]> {
+    const raw = await this.execJson<RawApp[]>(['apps', 'list', '--json']);
+    if (!Array.isArray(raw)) return [];
+    return raw.map((r) => toClerkApp(r)).filter((a): a is ClerkApp => a !== undefined);
   }
 
   async createApp(name: string): Promise<ClerkApp> {
     // Real payload shape (verified live): application_id + instances[],
     // each instance carrying environment_type and publishable_key.
-    const app = await this.execJson<{
-      application_id?: string;
-      name?: string;
-      instances?: { instance_id: string; environment_type: string; publishable_key: string }[];
-    }>(['apps', 'create', name, '--json']);
-    if (!app.application_id) {
+    const raw = await this.execJson<RawApp>(['apps', 'create', name, '--json']);
+    const app = toClerkApp(raw, name);
+    if (!app) {
       throw new ClerkError('api', 'clerk apps create returned no application id');
     }
-    const dev = app.instances?.find((i) => i.environment_type === 'development');
-    return {
-      id: app.application_id,
-      name: app.name ?? name,
-      devPublishableKey: dev?.publishable_key,
-    };
+    return app;
   }
 
   /**
@@ -162,12 +177,27 @@ export class ClerkCli {
   async patchConfig(appId: string, patch: Record<string, unknown>): Promise<void> {
     await this.exec(['config', 'patch', '--app', appId, '--json', JSON.stringify(patch), '--yes']);
   }
+
+  /**
+   * Pulls the dev-instance keys into an env file (merge, not clobber —
+   * the CLI updates Clerk keys in place and preserves everything else).
+   * `--app` works from any directory, so the scaffold dir needs no link.
+   */
+  async envPull(appId: string, file: string): Promise<void> {
+    await this.exec(['env', 'pull', '--app', appId, '--file', file]);
+  }
 }
 
-/** The CLI's agent mode reports failures as `{"error":{"code","message"}}`. */
+/**
+ * The CLI's agent mode reports failures as `{"error":{"code","message"}}`,
+ * sometimes behind the same human progress line that prefixes JSON on the
+ * success path — so parse from the first brace, like execJson does.
+ */
 function parseErrorMessage(raw: string): string | undefined {
+  const start = raw.indexOf('{');
+  if (start === -1) return undefined;
   try {
-    const parsed = JSON.parse(raw) as { error?: { message?: string } };
+    const parsed = JSON.parse(raw.slice(start)) as { error?: { message?: string } };
     return parsed.error?.message;
   } catch {
     return undefined;
