@@ -87,8 +87,16 @@ one way only: keel → Pier → app.
 
 ## Status
 
-Manifesto only. No code yet. Pier gets built on demand, when the first app actually needs
-users to log in, not before.
+Phase A is code: `npx pier --name <project> --methods google,password,magic-link,email-otp`
+creates the Clerk application and enables the chosen methods, fully headless. The only
+credential it needs is a **platform API key** (`ak_...`) in `CLERK_PLATFORM_API_KEY` —
+Clerk's account-plane key. An instance secret key (`sk_...`) is not enough: `apps create`
+and `config patch` live on the Platform API, which never accepts secret keys.
+
+The email-family config keys are provisional until pinned against a live
+`clerk config schema` (Pier validates at runtime and drops unknown keys loudly rather
+than guessing). Phases B (Infisical secrets), C (Next.js scaffold) and D (handoff) are
+next, on demand.
 
 ## License
 
