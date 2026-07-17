@@ -15,8 +15,10 @@ import {
 } from './config.js';
 import {
   CLERK_SECRET_NAMES,
+  INFISICAL_DEFAULT_HOST,
   InfisicalClient,
   InfisicalError,
+  type InfisicalCoordinates,
   PROD_SLUG,
   buildSecretPlan,
   extractClerkKeys,
@@ -39,6 +41,8 @@ Options:
   --name <project>      Fleet project name (Clerk application and app repo take it)
   --methods <list>      Comma-separated: ${AUTH_METHODS.join(', ')}
   --dir <path>          Where to scaffold the app repo (default: ./<project>)
+  --owner <login>       GitHub owner (organization or user) for the created repo
+                        (default: the account gh is logged in as)
   --skip-github         Do not create/push the GitHub repo (Phase D)
   --dry-run             Show what would happen without calling Clerk
   --yes                 Accept defaults, fail instead of prompting
@@ -55,11 +59,14 @@ Credentials:
                            Optional (same shell keel ran in): lets Phase D give the
                            app repo its image-push credential and wiring.
 
-Phases A + B + C: creates the Clerk application, enables the chosen auth
-methods, pushes the keys to the Infisical project keel provisioned (dev
-keys to non-prod environments, placeholders to prod, never overwriting),
-scaffolds the DDD-layered Next.js app repo with a gitignored .env.local,
-and git-inits it. Pier is not a dependency of the generated repo.
+Order (keel's principle — verify every link first, create last): pier first
+verifies the Infisical link (asking for missing credentials instead of
+skipping) and reads the keel project's environments, then checks the Clerk
+credential, and only then creates: the Clerk application with the chosen auth
+methods, the keys pushed to keel's Infisical project (dev keys to non-prod
+environments, placeholders to prod, never overwriting), and the DDD-layered
+Next.js app repo with a gitignored .env.local, git-inited. Pier is not a
+dependency of the generated repo.
 `;
 
 async function main(): Promise<void> {
@@ -68,6 +75,7 @@ async function main(): Promise<void> {
       name: { type: 'string' },
       methods: { type: 'string' },
       dir: { type: 'string' },
+      owner: { type: 'string' },
       'skip-github': { type: 'boolean', default: false },
       'dry-run': { type: 'boolean', default: false },
       yes: { type: 'boolean', default: false },
@@ -95,7 +103,7 @@ async function main(): Promise<void> {
   );
 
   const targetDir = resolve(values.dir ?? projectName);
-  const infisical = readInfisicalCoordinates(process.env);
+  let infisical = readInfisicalCoordinates(process.env);
 
   if (values['dry-run']) {
     p.log.info(`Dry run — would create Clerk app "${projectName}" and enable:`);
@@ -125,10 +133,59 @@ async function main(): Promise<void> {
   const existingScaffold = await detectExistingScaffold(targetDir, projectName);
   if (!existingScaffold) await ensureEmptyTarget(targetDir);
 
+  const spin = p.spinner();
+
+  // Phase 0 — keel's principle: verify every credential and link up front,
+  // create nothing until all of them are confirmed. Infisical comes first
+  // because keel already provisioned the project — its environments tell
+  // pier what the fleet looks like before anything is created on Clerk,
+  // and a bad link stops the run while there is still nothing to orphan.
+  if (!infisical && !nonInteractive) {
+    const wants = await p.confirm({
+      message:
+        'No Infisical credentials in this shell. Enter the keel machine identity now? ' +
+        '(No = keys stay only in the local .env.local)',
+    });
+    bailOnCancel(wants);
+    if (wants) {
+      infisical = {
+        host: process.env.INFISICAL_HOST?.trim() || INFISICAL_DEFAULT_HOST,
+        clientId: await askText('INFISICAL_CLIENT_ID (the keel machine identity)'),
+        clientSecret: await askSecret('INFISICAL_CLIENT_SECRET'),
+        projectId: process.env.INFISICAL_PROJECT_ID?.trim() || undefined,
+      } satisfies InfisicalCoordinates;
+    }
+  }
+
+  let infisicalClient: InfisicalClient | undefined;
+  let infisicalProject: { id: string; environments: string[] } | undefined;
+  if (infisical) {
+    const coords = infisical;
+    try {
+      infisicalProject = await step(
+        spin,
+        'Verifying the Infisical link',
+        (proj) =>
+          `Infisical project "${projectName}" found — id ${proj.id}, ` +
+          `environments: ${proj.environments.join(', ') || '(none)'}`,
+        () => {
+          infisicalClient = new InfisicalClient(coords);
+          return infisicalClient.resolveProject(projectName);
+        },
+      );
+    } catch (error) {
+      if (!(error instanceof InfisicalError)) throw error;
+      p.log.error(
+        `Infisical verification failed (${error.message}). Nothing was created — ` +
+          'fix the credentials (or run keel first) and re-run pier.',
+      );
+      process.exit(1);
+    }
+  }
+
   const platformKey = validatePlatformKey(process.env.CLERK_PLATFORM_API_KEY);
 
   const clerk = new ClerkCli(platformKey);
-  const spin = p.spinner();
 
   let apps: ClerkApp[];
   try {
@@ -239,27 +296,30 @@ async function main(): Promise<void> {
   }
 
   // Phase B — the keys' real home is the Infisical project keel provisioned;
-  // .env.local is only the local-dev convenience copy. Along the way, pick
+  // .env.local is only the local-dev convenience copy. The link and the
+  // project were verified in Phase 0 — this only pushes. Along the way, pick
   // up the APP_URL keel's pipeline synced for each non-prod environment.
-  let nonProdEnvs: string[] | undefined;
+  // Known since Phase 0 — the CI wiring gets them even when the push fails.
+  const nonProdEnvs = infisicalProject?.environments.filter((slug) => slug !== PROD_SLUG);
   let appUrls: string[] = [];
-  if (!infisical) {
+  if (!infisicalClient || !infisicalProject) {
     p.log.info(
-      'Infisical push skipped — export INFISICAL_CLIENT_ID / INFISICAL_CLIENT_SECRET ' +
-        '(the keel machine identity) to store the keys in the fleet secret store.',
+      'Infisical push skipped — no keel machine identity was given, so the Clerk keys ' +
+        'live only in the local .env.local. Re-run pier with the credentials to store them.',
     );
   } else if (!keysPulled) {
     p.log.warn('Skipping the Infisical push: the Clerk keys were not pulled (see above).');
   } else {
+    const client = infisicalClient;
+    const project = infisicalProject;
     try {
       const result = await step(
         spin,
-        'Pushing the Clerk keys to Infisical',
+        `Pushing the Clerk keys to Infisical (project ${project.id})`,
         (r: { created: number; kept: number }) =>
-          `Clerk keys in Infisical (${r.created} created, ${r.kept} already set and kept)`,
+          `Clerk keys in Infisical project ${project.id} ` +
+          `(${r.created} created, ${r.kept} already set and kept)`,
         async () => {
-          const client = new InfisicalClient(infisical);
-          const project = await client.resolveProject(projectName);
           const clerkKeys = extractClerkKeys(await readFile(envLocal, 'utf8'));
           const missing = CLERK_SECRET_NAMES.filter((n) => !clerkKeys[n]);
           if (missing.length > 0) {
@@ -271,21 +331,19 @@ async function main(): Promise<void> {
             if ((await client.pushSecret(project.id, push)) === 'created') created += 1;
             else kept += 1;
           }
-          const envs = project.environments.filter((slug) => slug !== PROD_SLUG);
           const urls: string[] = [];
-          for (const env of envs) {
+          for (const env of nonProdEnvs ?? []) {
             const url = await client.getSecret(project.id, env, 'APP_URL');
             if (url && /^https?:\/\//.test(url)) urls.push(url);
           }
-          return { created, kept, envs, urls };
+          return { created, kept, urls };
         },
       );
-      nonProdEnvs = result.envs;
       appUrls = result.urls;
       // The keel↔Clerk asymmetry must be said out loud, not discovered:
       // keel has N environments, Clerk has two instances.
       p.log.info(
-        `Environment map: ${result.envs.join(', ') || '(none)'} → Clerk development instance ` +
+        `Environment map: ${(nonProdEnvs ?? []).join(', ') || '(none)'} → Clerk development instance ` +
           `(one shared user pool); prod → production instance (placeholders until you ` +
           'set up its Google OAuth client + DNS and replace them in Infisical).',
       );
@@ -337,13 +395,16 @@ async function main(): Promise<void> {
   } else if (!gitReady) {
     p.log.warn('Skipping the GitHub publish: the repo has no commit yet.');
   } else {
+    // gh resolves a bare name to the logged-in user; --owner routes the
+    // repo into an organization instead.
+    const repoSlug = values.owner ? `${values.owner}/${projectName}` : projectName;
     try {
       const publisher = new GitHubPublisher();
       const repoUrl = await step(
         spin,
         'Publishing to GitHub (private repo)',
         (url) => `On GitHub: ${url}`,
-        () => publisher.publish(targetDir, projectName),
+        () => publisher.publish(targetDir, repoSlug),
       );
       void repoUrl;
       const region = process.env.SCW_REGION?.trim() || 'fr-par';
@@ -366,7 +427,7 @@ async function main(): Promise<void> {
       if (!(error instanceof GhError)) throw error;
       p.log.warn(
         `GitHub publish incomplete (${error.message}). Manual path: ` +
-          `cd ${targetDir} && gh repo create ${projectName} --private --source . --push`,
+          `cd ${targetDir} && gh repo create ${repoSlug} --private --source . --push`,
       );
     }
   }
@@ -403,6 +464,13 @@ function missing(what: string): never {
 
 async function askText(message: string): Promise<string> {
   const answer = await p.text({ message });
+  bailOnCancel(answer);
+  return answer as string;
+}
+
+/** Like askText, but masked — for credentials that must not echo. */
+async function askSecret(message: string): Promise<string> {
+  const answer = await p.password({ message });
   bailOnCancel(answer);
   return answer as string;
 }
