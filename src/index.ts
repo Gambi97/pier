@@ -102,8 +102,9 @@ async function main(): Promise<void> {
     for (const m of methods) p.log.message(`  - ${methodLabel(m)}`);
     p.log.info(
       infisical
-        ? 'Would push the Clerk keys to the keel Infisical project ' +
-            '(dev keys to non-prod environments, placeholders to prod).'
+        ? 'Would push the Clerk keys to the keel Infisical project: every non-prod ' +
+            'environment gets the Clerk development-instance keys (one shared user ' +
+            'pool), prod gets placeholders for its own production instance.'
         : 'Infisical push would be skipped (INFISICAL_CLIENT_ID/SECRET not set).',
     );
     const files = Object.keys(planScaffold(projectName));
@@ -260,6 +261,13 @@ async function main(): Promise<void> {
       );
       nonProdEnvs = result.envs;
       appUrls = result.urls;
+      // The keel↔Clerk asymmetry must be said out loud, not discovered:
+      // keel has N environments, Clerk has two instances.
+      p.log.info(
+        `Environment map: ${result.envs.join(', ') || '(none)'} → Clerk development instance ` +
+          `(one shared user pool); prod → production instance (placeholders until you ` +
+          'set up its Google OAuth client + DNS and replace them in Infisical).',
+      );
     } catch (error) {
       if (!(error instanceof InfisicalError)) throw error;
       p.log.warn(

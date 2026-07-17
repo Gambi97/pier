@@ -725,6 +725,10 @@ implement it in \`src/infrastructure\`, bind it in \`src/composition.ts\`.
 - **No secrets in this repo, ever.** Local dev:
   \`npx clerk env pull --app <app id>\` → \`.env.local\` (gitignored).
   Deploys read \`CLERK_*\` at runtime from Infisical via keel.
+- **Environments**: all non-production environments (and local dev) share
+  Clerk's development instance — **one shared user pool**, banner included.
+  Production has its own instance and its own users; its keys live in
+  Infisical's \`prod\` environment.
 - **One portable image**: built with a dummy publishable key, real keys
   injected at runtime; listens on **8080** (keel's \`container_port\`).
 - **CI pushes the image** to keel's env registries: merge to main → non-prod

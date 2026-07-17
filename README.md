@@ -57,6 +57,15 @@ Adding a new framework means adding an adapter, never touching the core.
   the Next.js interface layer (`src/app/`, `src/proxy.ts`, the sign-in / sign-up pages).
   Auth is a generic subdomain (opinion 3), so nothing provider-specific may leak into the
   domain model: swapping Clerk for WorkOS must not touch `src/domain` or `src/application`.
+- **Environment mapping: keel decides, pier discovers.** keel has N environments
+  (`prod` / `staging+prod` / `dev+staging+prod`); Clerk has one application with two
+  fixed instances (development, production). Pier reads the environments that actually
+  exist from keel's Infisical project and maps them: **every non-production environment
+  gets the development-instance keys — one shared user pool** — while `prod` maps to the
+  production instance (placeholders until its one-time Google + DNS setup). Right
+  trade-off at fleet scale (free, zero setup); if a project ever needs an isolated
+  staging pool, the evolution is one Clerk application per environment — a pier flag,
+  not a redesign, since Phase B already enumerates environments dynamically.
 - **Auth methods (v1): Google, email + password, magic link, email OTP.** All on Clerk's
   free tier. In Clerk's **development** instance, Google works immediately with Clerk's
   shared credentials (no Google Cloud Console). A **production** instance needs your own

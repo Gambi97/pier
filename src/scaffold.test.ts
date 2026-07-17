@@ -146,6 +146,8 @@ describe('writeScaffold', () => {
     expect(agents).toContain('check:boundaries');
     expect(agents).toContain('src/composition.ts');
     expect(agents).toContain('No secrets in this repo');
+    // The keel↔Clerk environment asymmetry must reach whoever inherits the repo.
+    expect(agents).toContain('one shared user pool');
     // One source of truth: CLAUDE.md imports AGENTS.md.
     expect(FILES['CLAUDE.md']).toContain('@AGENTS.md');
   });
