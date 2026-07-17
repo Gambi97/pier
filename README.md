@@ -11,7 +11,7 @@ is the ship. Two reusable run-once bootstrappers, one bespoke app on top.
 
 ## Opinions
 
-Three opinions drive every decision; a change that violates one is wrong even if useful.
+Four opinions drive every decision; a change that violates one is wrong even if useful.
 
 1. **Run once, then leave.** Pier is a bootstrapper, not a control plane. It configures
    things, hands you a repo you own, and exits. It never becomes a runtime dependency.
@@ -20,6 +20,12 @@ Three opinions drive every decision; a change that violates one is wrong even if
 3. **Buy the generic, don't build it.** Authentication is a generic subdomain, not the
    core domain of any app it serves. Pier uses a managed provider behind a swappable seam
    (env vars / OIDC) rather than self-hosting an auth stack you'd then have to own.
+4. **Plumbing, not identity.** Pier wires auth methods, keys, secret store, allowed
+   origins, routes and the repo handoff — the plumbing that connects the app to its
+   identity provider. It never touches how anything _looks_: the widget appearance lives
+   in the app's `theme.ts`, and the transactional email branding lives on the Clerk
+   instance (the app owner's to set — emails are server-sent, so they can't live in the
+   repo). Each app carries its own visual identity; Pier stays out of it entirely.
 
 ## Shape
 

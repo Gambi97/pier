@@ -393,9 +393,15 @@ export default function RootLayout({ children }: { children: ReactNode }) {
 }
 
 const THEME = `/**
- * Theme placeholder: brand Clerk's prebuilt components here (colors, radii,
- * fonts, per-component overrides) via the appearance API —
- * https://clerk.com/docs/customization/overview
+ * Your app's visual identity — this file is yours to own and edit; pier
+ * scaffolds it once and never comes back for it. Brand Clerk's prebuilt
+ * components here (colors, radii, fonts, per-component overrides) via the
+ * appearance API — https://clerk.com/docs/customization/overview
+ *
+ * Scope note: this themes the in-app widgets only. Transactional emails
+ * (OTP, magic link, password reset, verification) are sent by Clerk's
+ * servers, so their branding is configured on the Clerk instance
+ * (Dashboard), not here — it cannot live in this repo.
  */
 export const appearance = {
   variables: {
@@ -608,6 +614,17 @@ the contract.
   \`src/app/theme.ts\`.
 - \`/dashboard\` — example protected route; add more to the matcher in
   \`src/proxy.ts\`.
+
+## Branding is yours
+
+Pier wired the auth plumbing and left; the look is entirely your call.
+
+- **In-app widgets** (\`<SignIn>\`, \`<UserButton>\`, …) — edit
+  \`src/app/theme.ts\` (Clerk's \`appearance\` API). This is app code you own.
+- **Transactional emails** (OTP, magic link, password reset, verification) —
+  sent by Clerk's servers, so their branding is configured on the Clerk
+  instance (Dashboard → Customization), not in this repo. Clerk owns the
+  sending; you own the look; pier touches neither.
 
 ## Deploy (keel)
 
