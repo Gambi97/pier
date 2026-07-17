@@ -79,6 +79,16 @@ describe('extractClerkKeys', () => {
       CLERK_SECRET_KEY: 'sk_test_xyz',
     });
   });
+
+  it('falls back to the generic publishable-key name the CLI writes outside Next.js', () => {
+    const keys = extractClerkKeys(
+      ['CLERK_PUBLISHABLE_KEY=pk_test_abc', 'CLERK_SECRET_KEY=sk_test_xyz'].join('\n'),
+    );
+    expect(keys).toEqual({
+      NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY: 'pk_test_abc',
+      CLERK_SECRET_KEY: 'sk_test_xyz',
+    });
+  });
 });
 
 describe('buildSecretPlan', () => {

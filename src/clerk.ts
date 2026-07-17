@@ -33,12 +33,17 @@ export interface RunResult {
 }
 
 /** Injectable process runner so tests never spawn the real CLI. */
-export type Runner = (args: string[], env: Record<string, string>) => Promise<RunResult>;
+export type Runner = (
+  args: string[],
+  env: Record<string, string>,
+  cwd?: string,
+) => Promise<RunResult>;
 
-export const spawnRunner: Runner = (args, env) =>
+export const spawnRunner: Runner = (args, env, cwd) =>
   new Promise((resolve) => {
     const child = spawn('npx', ['--yes', 'clerk', ...args], {
       env: { ...process.env, ...env },
+      ...(cwd ? { cwd } : {}),
       stdio: ['ignore', 'pipe', 'pipe'],
     });
     let stdout = '';
@@ -129,10 +134,11 @@ export class ClerkCli {
     }
   }
 
-  private async exec(args: string[]): Promise<string> {
+  private async exec(args: string[], cwd?: string): Promise<string> {
     const { status, stdout, stderr } = await this.run(
       [...args, '--mode', 'agent'],
       this.platformKey ? { CLERK_PLATFORM_API_KEY: this.platformKey } : {},
+      cwd,
     );
     if (status === 127) {
       throw new ClerkError(
@@ -225,8 +231,14 @@ export class ClerkCli {
    * the CLI updates Clerk keys in place and preserves everything else).
    * `--app` works from any directory, so the scaffold dir needs no link.
    */
-  async envPull(appId: string, file: string): Promise<void> {
-    await this.exec(['env', 'pull', '--app', appId, '--file', file]);
+  /**
+   * cwd matters: `clerk env pull` names the keys after the framework it
+   * detects there — inside the scaffolded Next.js app it writes the
+   * NEXT_PUBLIC_-prefixed publishable key the app reads; anywhere else it
+   * falls back to the generic CLERK_PUBLISHABLE_KEY.
+   */
+  async envPull(appId: string, file: string, cwd?: string): Promise<void> {
+    await this.exec(['env', 'pull', '--app', appId, '--file', file], cwd);
   }
 
   /**

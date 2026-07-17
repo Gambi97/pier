@@ -79,17 +79,27 @@ export function readInfisicalCoordinates(
   };
 }
 
-/** Pulls the two Clerk keys out of the .env.local `clerk env pull` wrote. */
+/**
+ * Pulls the two Clerk keys out of the .env.local `clerk env pull` wrote.
+ * Outside a Next.js project the CLI names the publishable key generically
+ * (CLERK_PUBLISHABLE_KEY); accept it as a fallback for the NEXT_PUBLIC_
+ * name so the push never trips over the CLI's framework detection.
+ */
 export function extractClerkKeys(envFileContent: string): Record<string, string> {
-  const keys: Record<string, string> = {};
+  const all: Record<string, string> = {};
   for (const line of envFileContent.split('\n')) {
     const match = /^\s*([A-Z0-9_]+)\s*=\s*(.*)\s*$/.exec(line);
     if (!match) continue;
     const [, name, rawValue] = match;
     const value = rawValue!.replace(/^["']|["']$/g, '');
-    if ((CLERK_SECRET_NAMES as readonly string[]).includes(name!) && value) {
-      keys[name!] = value;
-    }
+    if (value) all[name!] = value;
+  }
+  const keys: Record<string, string> = {};
+  for (const name of CLERK_SECRET_NAMES) {
+    if (all[name]) keys[name] = all[name];
+  }
+  if (!keys.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY && all.CLERK_PUBLISHABLE_KEY) {
+    keys.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY = all.CLERK_PUBLISHABLE_KEY;
   }
   return keys;
 }

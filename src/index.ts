@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { readFile } from 'node:fs/promises';
+import { appendFile, readFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { parseArgs } from 'node:util';
 
@@ -345,8 +345,22 @@ async function main(): Promise<void> {
   let keysPulled = true;
   try {
     await step(spin, 'Pulling Clerk keys into .env.local', 'Keys in .env.local (gitignored)', () =>
-      clerk.envPull(app.id, envLocal),
+      // Run inside the scaffold so the CLI detects Next.js and writes the
+      // NEXT_PUBLIC_-prefixed key names the app actually reads.
+      clerk.envPull(app.id, envLocal, targetDir),
     );
+    // Belt and braces for the CLI's framework detection: the app reads the
+    // NEXT_PUBLIC_ name, so alias a generically-named publishable key to it.
+    const pulled = extractClerkKeys(await readFile(envLocal, 'utf8'));
+    if (
+      pulled.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY &&
+      !/^\s*NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY\s*=/m.test(await readFile(envLocal, 'utf8'))
+    ) {
+      await appendFile(
+        envLocal,
+        `\nNEXT_PUBLIC_CLERK_PUBLISHABLE_KEY=${pulled.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY}\n`,
+      );
+    }
   } catch (error) {
     if (!(error instanceof ClerkError)) throw error;
     keysPulled = false;

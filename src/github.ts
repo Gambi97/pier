@@ -24,26 +24,35 @@ export interface GhResult {
 /** Injectable `gh` runner so tests never touch the network or the CLI. */
 export type GhRunner = (args: string[], opts: { cwd: string; input?: string }) => Promise<GhResult>;
 
-export const spawnGh: GhRunner = (args, opts) =>
-  new Promise((resolve) => {
-    const child = spawn('gh', args, {
-      cwd: opts.cwd,
-      stdio: [opts.input === undefined ? 'ignore' : 'pipe', 'pipe', 'pipe'],
+const spawnCli =
+  (bin: string): GhRunner =>
+  (args, opts) =>
+    new Promise((resolve) => {
+      const child = spawn(bin, args, {
+        cwd: opts.cwd,
+        stdio: [opts.input === undefined ? 'ignore' : 'pipe', 'pipe', 'pipe'],
+      });
+      let stdout = '';
+      let stderr = '';
+      child.stdout?.on('data', (d: Buffer) => (stdout += d.toString()));
+      child.stderr?.on('data', (d: Buffer) => (stderr += d.toString()));
+      child.on('error', () => resolve({ status: 127, stdout, stderr }));
+      child.on('close', (status) => resolve({ status: status ?? 1, stdout, stderr }));
+      if (opts.input !== undefined) child.stdin?.end(opts.input);
     });
-    let stdout = '';
-    let stderr = '';
-    child.stdout?.on('data', (d: Buffer) => (stdout += d.toString()));
-    child.stderr?.on('data', (d: Buffer) => (stderr += d.toString()));
-    child.on('error', () => resolve({ status: 127, stdout, stderr }));
-    child.on('close', (status) => resolve({ status: status ?? 1, stdout, stderr }));
-    if (opts.input !== undefined) child.stdin?.end(opts.input);
-  });
+
+export const spawnGh: GhRunner = spawnCli('gh');
+
+/** Same shape, spawning `git` — publish uses it to repair a broken remote. */
+export const spawnGit: GhRunner = spawnCli('git');
 
 export class GitHubPublisher {
   private readonly run: GhRunner;
+  private readonly runGit: GhRunner;
 
-  constructor(run: GhRunner = spawnGh) {
+  constructor(run: GhRunner = spawnGh, runGit: GhRunner = spawnGit) {
     this.run = run;
+    this.runGit = runGit;
   }
 
   private async gh(args: string[], cwd: string, input?: string): Promise<string> {
@@ -68,6 +77,14 @@ export class GitHubPublisher {
       cwd: dir,
     });
     if (existing.status === 0 && existing.stdout.trim()) return existing.stdout.trim();
+    // gh could not resolve a repo from the directory, so any origin remote
+    // sitting there is unusable (a dead or malformed URL from an earlier
+    // failed publish) and would make `repo create --remote origin` refuse
+    // to attach — drop it and let the create own the remote.
+    const origin = await this.runGit(['remote', 'get-url', 'origin'], { cwd: dir });
+    if (origin.status === 0) {
+      await this.runGit(['remote', 'remove', 'origin'], { cwd: dir });
+    }
     const out = await this.gh(
       ['repo', 'create', name, '--private', '--source', '.', '--remote', 'origin', '--push'],
       dir,
