@@ -139,14 +139,35 @@ async function main(): Promise<void> {
       () => clerk.listApps(),
     );
   } catch (error) {
-    if (error instanceof ClerkError && error.code === 'auth') {
+    if (!(error instanceof ClerkError) || error.code !== 'auth') throw error;
+
+    // A rejected platform key is a bad key, not a missing login — logging in
+    // wouldn't help it; and a non-interactive run (CI) has no browser to log
+    // in with. Both stay a hard error with the manual path.
+    if (platformKey || nonInteractive) {
       p.log.error(
-        'No Clerk credential found. Either export CLERK_PLATFORM_API_KEY (ak_...) ' +
-          'or run `npx clerk auth login` once, then re-run pier.',
+        platformKey
+          ? 'The CLERK_PLATFORM_API_KEY was rejected — check the key (ak_...).'
+          : 'No Clerk credential found. Export CLERK_PLATFORM_API_KEY (ak_...) or run ' +
+              '`npx clerk auth login`, then re-run pier.',
       );
       process.exit(1);
     }
-    throw error;
+
+    // Interactive and no stored login: do what keel does — log in inline and
+    // carry on in the same run, rather than making the operator start over.
+    const proceed = await p.confirm({
+      message: 'No Clerk login found. Log in now? (opens your browser)',
+    });
+    bailOnCancel(proceed);
+    if (!proceed) {
+      p.cancel('A Clerk login is required. Run `npx clerk auth login`, then re-run pier.');
+      process.exit(1);
+    }
+    await clerk.login();
+    apps = await step(spin, 'Re-checking the Clerk login', 'Clerk credential OK', () =>
+      clerk.listApps(),
+    );
   }
 
   // Reuse an existing app with the fleet name instead of creating a

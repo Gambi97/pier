@@ -1,6 +1,13 @@
 import { describe, expect, it } from 'vitest';
 
-import { ClerkCli, ClerkError, type Runner, type RunResult } from './clerk.js';
+import {
+  ClerkCli,
+  ClerkError,
+  spawnRunner,
+  type InteractiveRunner,
+  type Runner,
+  type RunResult,
+} from './clerk.js';
 
 function fakeRunner(responses: Record<string, RunResult>): {
   runner: Runner;
@@ -168,6 +175,23 @@ describe('ClerkCli', () => {
   it('rejects output with no JSON where JSON is promised', async () => {
     const { runner } = fakeRunner({ 'apps create': ok('no json here') });
     await expect(new ClerkCli('ak_x', runner).createApp('x')).rejects.toBeInstanceOf(ClerkError);
+  });
+
+  it('runs the interactive browser login via the inherited-stdio runner', async () => {
+    const seen: string[][] = [];
+    const interactive: InteractiveRunner = (args) => {
+      seen.push(args);
+      return Promise.resolve(0);
+    };
+    await new ClerkCli(undefined, spawnRunner, interactive).login();
+    expect(seen).toEqual([['auth', 'login']]);
+  });
+
+  it('maps a failed login to a typed auth error, a missing npx to not-installed', async () => {
+    const failed = new ClerkCli(undefined, spawnRunner, () => Promise.resolve(1));
+    await expect(failed.login()).rejects.toMatchObject({ code: 'auth' });
+    const missing = new ClerkCli(undefined, spawnRunner, () => Promise.resolve(127));
+    await expect(missing.login()).rejects.toMatchObject({ code: 'not-installed' });
   });
 });
 

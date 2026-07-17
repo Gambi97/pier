@@ -49,6 +49,22 @@ export const spawnRunner: Runner = (args, env) =>
     child.on('close', (status) => resolve({ status: status ?? 1, stdout, stderr }));
   });
 
+/**
+ * The one call that needs the operator's terminal rather than captured pipes:
+ * the browser OAuth login. It inherits stdio so `clerk auth login` can print
+ * its device/verification prompt and open the browser, and resolves the exit
+ * status (127 when `npx` itself is missing). Separate from Runner, which
+ * captures output for JSON parsing. Injectable so tests never spawn it.
+ */
+export type InteractiveRunner = (args: string[]) => Promise<number>;
+
+export const spawnInteractive: InteractiveRunner = (args) =>
+  new Promise((resolve) => {
+    const child = spawn('npx', ['--yes', 'clerk', ...args], { stdio: 'inherit' });
+    child.on('error', () => resolve(127));
+    child.on('close', (status) => resolve(status ?? 1));
+  });
+
 export interface ClerkApp {
   id: string;
   name: string;
@@ -74,6 +90,7 @@ function toClerkApp(raw: RawApp, fallbackName?: string): ClerkApp | undefined {
 
 export class ClerkCli {
   private readonly run: Runner;
+  private readonly runInteractive: InteractiveRunner;
   private readonly platformKey: string | undefined;
 
   /**
@@ -82,9 +99,34 @@ export class ClerkCli {
    * a previous `clerk auth login` stored on this machine. With neither,
    * every call fails as a typed 'auth' error.
    */
-  constructor(platformKey: string | undefined, run: Runner = spawnRunner) {
+  constructor(
+    platformKey: string | undefined,
+    run: Runner = spawnRunner,
+    runInteractive: InteractiveRunner = spawnInteractive,
+  ) {
     this.platformKey = platformKey;
     this.run = run;
+    this.runInteractive = runInteractive;
+  }
+
+  /**
+   * Runs the browser OAuth login (`clerk auth login`) with the terminal
+   * inherited, so pier can recover from a missing credential in-place — the
+   * way keel does — instead of erroring out and making the operator log in by
+   * hand and start the run over. Throws a typed error when the login command
+   * cannot run or the login itself fails.
+   */
+  async login(): Promise<void> {
+    const status = await this.runInteractive(['auth', 'login']);
+    if (status === 127) {
+      throw new ClerkError(
+        'not-installed',
+        'Could not run the Clerk CLI. Pier shells out to `npx clerk`; make sure npx works here.',
+      );
+    }
+    if (status !== 0) {
+      throw new ClerkError('auth', `clerk auth login failed (exit ${status}).`);
+    }
   }
 
   private async exec(args: string[]): Promise<string> {
