@@ -43,6 +43,8 @@ Options:
   --dir <path>          Where to scaffold the app repo (default: ./<project>)
   --owner <login>       GitHub owner (organization or user) for the created repo
                         (default: the account gh is logged in as)
+  --repo <name>         Repository name on GitHub (default: the project name —
+                        Clerk and Infisical always keep the project name)
   --skip-github         Do not create/push the GitHub repo (Phase D)
   --dry-run             Show what would happen without calling Clerk
   --yes                 Accept defaults, fail instead of prompting
@@ -76,6 +78,7 @@ async function main(): Promise<void> {
       methods: { type: 'string' },
       dir: { type: 'string' },
       owner: { type: 'string' },
+      repo: { type: 'string' },
       'skip-github': { type: 'boolean', default: false },
       'dry-run': { type: 'boolean', default: false },
       yes: { type: 'boolean', default: false },
@@ -471,8 +474,10 @@ async function main(): Promise<void> {
     p.log.warn('Skipping the GitHub publish: the repo has no commit yet.');
   } else {
     // gh resolves a bare name to the logged-in user; --owner routes the
-    // repo into an organization instead.
-    const repoSlug = values.owner ? `${values.owner}/${projectName}` : projectName;
+    // repo into an organization, --repo detaches the repo name from the
+    // project name (which Clerk and Infisical keep).
+    const repoName = values.repo?.trim() || projectName;
+    const repoSlug = values.owner ? `${values.owner}/${repoName}` : repoName;
     try {
       const publisher = new GitHubPublisher();
       const repoUrl = await step(
