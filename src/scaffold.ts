@@ -298,9 +298,17 @@ const PROXY = `import { clerkMiddleware, createRouteMatcher } from '@clerk/nextj
 // Public-first: everything is public except what is listed here.
 const isProtectedRoute = createRouteMatcher(['/dashboard(.*)']);
 
-export default clerkMiddleware(async (auth, req) => {
-  if (isProtectedRoute(req)) await auth.protect();
-});
+export default clerkMiddleware(
+  async (auth, req) => {
+    if (isProtectedRoute(req)) await auth.protect();
+  },
+  {
+    // Runtime-injected key (keel/Infisical); the NEXT_PUBLIC_ name is inlined
+    // at build and can only serve local dev.
+    publishableKey:
+      process.env.CLERK_PUBLISHABLE_KEY ?? process.env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY,
+  },
+);
 
 export const config = {
   matcher: [
@@ -486,13 +494,16 @@ export default function RootLayout({ children }: { children: ReactNode }) {
     <html lang="en">
       <body>
         {/*
-          publishableKey is read per-request (not inlined at build), so one
-          image serves every environment: keel injects the real key from
-          Infisical at runtime, and the build only ever sees a dummy.
+          One image serves every environment: keel injects the real key from
+          Infisical at runtime as CLERK_PUBLISHABLE_KEY — a name Next does
+          NOT inline at build (NEXT_PUBLIC_* is frozen into the bundle, so
+          it can only be the local-dev/build fallback).
         */}
         <ClerkProvider
           dynamic
-          publishableKey={process.env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY}
+          publishableKey={
+            process.env.CLERK_PUBLISHABLE_KEY ?? process.env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY
+          }
           appearance={appearance}
         >
           {children}

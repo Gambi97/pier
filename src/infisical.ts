@@ -43,6 +43,9 @@ export const PROD_PLACEHOLDER = 'placeholder-set-after-clerk-production-setup';
 
 export const CLERK_SECRET_NAMES = [
   'NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY',
+  // Same value, runtime name: Next inlines NEXT_PUBLIC_* into the bundle at
+  // build, so the container reads this one per-request (keel injects it).
+  'CLERK_PUBLISHABLE_KEY',
   'CLERK_SECRET_KEY',
 ] as const;
 
@@ -98,8 +101,14 @@ export function extractClerkKeys(envFileContent: string): Record<string, string>
   for (const name of CLERK_SECRET_NAMES) {
     if (all[name]) keys[name] = all[name];
   }
-  if (!keys.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY && all.CLERK_PUBLISHABLE_KEY) {
-    keys.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY = all.CLERK_PUBLISHABLE_KEY;
+  // The two publishable-key names are one value — fill either from the other
+  // (.env.local carries the NEXT_PUBLIC_ one; some Clerk CLI versions write
+  // the bare one).
+  if (!keys.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY && keys.CLERK_PUBLISHABLE_KEY) {
+    keys.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY = keys.CLERK_PUBLISHABLE_KEY;
+  }
+  if (!keys.CLERK_PUBLISHABLE_KEY && keys.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY) {
+    keys.CLERK_PUBLISHABLE_KEY = keys.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY;
   }
   return keys;
 }

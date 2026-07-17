@@ -105,9 +105,13 @@ describe('planScaffold', () => {
     expect(dockerfile).toContain('ENV PORT=8080');
     expect(dockerfile).toContain('CMD ["node", "server.js"]');
     // The publishable key must NOT be baked in as a real build requirement:
-    // the layout reads it per-request instead.
+    // Next inlines NEXT_PUBLIC_* at build, so the per-request read must go
+    // through the runtime name, with the inlined one only as dev fallback.
     expect(FILES['src/app/layout.tsx']).toContain(
-      'publishableKey={process.env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY}',
+      'process.env.CLERK_PUBLISHABLE_KEY ?? process.env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY',
+    );
+    expect(FILES['src/proxy.ts']).toContain(
+      'process.env.CLERK_PUBLISHABLE_KEY ?? process.env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY',
     );
   });
 

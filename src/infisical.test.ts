@@ -76,6 +76,7 @@ describe('extractClerkKeys', () => {
     );
     expect(keys).toEqual({
       NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY: 'pk_test_abc',
+      CLERK_PUBLISHABLE_KEY: 'pk_test_abc',
       CLERK_SECRET_KEY: 'sk_test_xyz',
     });
   });
@@ -86,6 +87,7 @@ describe('extractClerkKeys', () => {
     );
     expect(keys).toEqual({
       NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY: 'pk_test_abc',
+      CLERK_PUBLISHABLE_KEY: 'pk_test_abc',
       CLERK_SECRET_KEY: 'sk_test_xyz',
     });
   });
@@ -95,9 +97,10 @@ describe('buildSecretPlan', () => {
   it('sends real keys to non-prod environments and placeholders to prod', () => {
     const plan = buildSecretPlan(['dev', 'staging', 'prod'], {
       NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY: 'pk',
+      CLERK_PUBLISHABLE_KEY: 'pk',
       CLERK_SECRET_KEY: 'sk',
     });
-    expect(plan).toHaveLength(6);
+    expect(plan).toHaveLength(9);
     for (const push of plan) {
       if (push.environment === 'prod') {
         expect(push.value).toBe(PROD_PLACEHOLDER);
