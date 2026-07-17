@@ -32,6 +32,8 @@ export function planScaffold(projectName: string): Record<string, string> {
     '.env.example': ENV_EXAMPLE,
     '.env.local': ENV_LOCAL,
     'README.md': readme(projectName),
+    'AGENTS.md': agentsDoc(projectName),
+    'CLAUDE.md': CLAUDE_MD,
     'src/proxy.ts': PROXY,
     'src/domain/README.md': DOMAIN_README,
     'src/application/README.md': APPLICATION_README,
@@ -665,6 +667,76 @@ jobs:
             docker push "\${ref}"
             echo "::notice::Pushed \${ref} — set container_image in \${env}.tfvars to deploy it."
           done
+`;
+
+/**
+ * Agent-facing operating manual. Most code landing in a generated repo is
+ * now written by coding agents; the architecture rules must be in their
+ * context BEFORE they write, not only in the CI that rejects them after.
+ * AGENTS.md is the cross-tool convention; CLAUDE.md imports it for Claude
+ * Code. Kept terse on purpose — agents pay per token.
+ */
+function agentsDoc(projectName: string): string {
+  return `# AGENTS.md — ${projectName}
+
+Operating manual for coding agents (and humans). This app was bootstrapped
+once by pier; pier is gone and is NOT a dependency — this repo's team owns
+everything here.
+
+## Architecture: DDD + hexagonal, enforced by CI
+
+- \`src/domain\` — core model. No framework, no provider, no I/O.
+- \`src/application\` — use cases + ports. Owns \`CurrentUserProvider\` and
+  \`AuthenticatedUser\` (the only view of the signed-in user inner layers see).
+- \`src/infrastructure\` — adapters implementing the ports. The ONLY place
+  the auth provider (Clerk) is named.
+- \`src/composition.ts\` — composition root. The ONLY file allowed to import
+  from \`@/infrastructure/...\`.
+- \`src/app\` + \`src/proxy.ts\` — Next.js interface layer.
+
+Two rules run in CI before the build (\`npm run check:boundaries\`):
+
+1. Nothing under \`src/domain\` or \`src/application\` may mention the auth
+   provider.
+2. Only \`src/composition.ts\` may import from \`@/infrastructure/...\`.
+
+If the check fails you: define/extend a port in \`src/application/ports\`,
+implement it in \`src/infrastructure\`, bind it in \`src/composition.ts\`.
+
+## Recipes
+
+- **Protect a route** → add its path to the matcher in \`src/proxy.ts\`.
+- **Who is signed in (server)** → \`currentUserProvider.getCurrentUser()\`
+  from \`@/composition\`. Never import \`@clerk/nextjs/server\` outside
+  \`src/infrastructure\`.
+- **New external capability** (db, mail, storage…) → port → adapter → bind
+  in \`src/composition.ts\`. Same seam pattern as auth.
+- **Widget look & feel** → \`src/app/theme.ts\` (Clerk appearance API).
+  Transactional email branding lives on the Clerk instance (Dashboard),
+  not in this repo.
+
+## Commands
+
+\`npm run dev\` · \`npm run build\` · \`npm run typecheck\` ·
+\`npm run check:boundaries\`
+
+## Fleet contract (do not change casually)
+
+- **No secrets in this repo, ever.** Local dev:
+  \`npx clerk env pull --app <app id>\` → \`.env.local\` (gitignored).
+  Deploys read \`CLERK_*\` at runtime from Infisical via keel.
+- **One portable image**: built with a dummy publishable key, real keys
+  injected at runtime; listens on **8080** (keel's \`container_port\`).
+- **CI pushes the image** to keel's env registries: merge to main → non-prod
+  (\`app:main-<sha>\`), tag \`vX.Y.Z\` → prod. Deploying = set
+  \`container_image\` in the infrastructure repo's tfvars.
+- \`Dockerfile\` and \`.github/workflows/ci.yml\` encode this contract with
+  the keel infrastructure repo — changing them changes the fleet contract.
+`;
+}
+
+/** Claude Code reads CLAUDE.md; the @import keeps one source of truth. */
+const CLAUDE_MD = `@AGENTS.md
 `;
 
 function readme(projectName: string): string {

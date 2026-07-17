@@ -23,6 +23,8 @@ describe('planScaffold', () => {
       '.gitignore',
       '.env.example',
       'README.md',
+      'AGENTS.md',
+      'CLAUDE.md',
       'src/proxy.ts',
       'src/domain/README.md',
       'src/application/ports/authenticated-user.ts',
@@ -137,6 +139,15 @@ describe('writeScaffold', () => {
       'utf8',
     );
     expect(adapter).toContain('@clerk/nextjs/server');
+  });
+
+  it('ships an agent manual that teaches the enforced rules', () => {
+    const agents = FILES['AGENTS.md']!;
+    expect(agents).toContain('check:boundaries');
+    expect(agents).toContain('src/composition.ts');
+    expect(agents).toContain('No secrets in this repo');
+    // One source of truth: CLAUDE.md imports AGENTS.md.
+    expect(FILES['CLAUDE.md']).toContain('@AGENTS.md');
   });
 
   it('ships the boundary rules with the repo, and they actually bite', async () => {
