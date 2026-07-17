@@ -22,7 +22,17 @@ import { ConfigError } from './config.js';
  *   its own Google OAuth client and DNS before its keys exist).
  */
 
-export class InfisicalError extends Error {}
+/** Which input a failure points at, so prompts can re-ask just that (keel's convention). */
+export type InfisicalErrorField = 'credentials' | 'project';
+
+export class InfisicalError extends Error {
+  constructor(
+    message: string,
+    readonly field: InfisicalErrorField = 'credentials',
+  ) {
+    super(message);
+  }
+}
 
 export const INFISICAL_DEFAULT_HOST = 'https://app.infisical.com';
 
@@ -165,8 +175,10 @@ export class InfisicalClient {
     );
     if (status !== 200 || !data.accessToken) {
       throw new InfisicalError(
-        `Infisical Universal Auth login failed (HTTP ${status}${data.message ? `: ${data.message}` : ''}). ` +
-          'Check the keel machine identity client ID/secret.',
+        `Infisical Universal Auth login failed on ${this.coords.host} ` +
+          `(HTTP ${status}${data.message ? `: ${data.message}` : ''}). ` +
+          'Check the keel machine identity client ID/secret — and that the host is the ' +
+          'one keel used (US/EU/self-hosted).',
       );
     }
     this.token = data.accessToken;
@@ -195,6 +207,7 @@ export class InfisicalClient {
               'has no access to it.'
           : `No Infisical project named "${projectName}" — keel creates it; run keel first ` +
               '(or set INFISICAL_PROJECT_ID explicitly).',
+        'project',
       );
     }
     return {

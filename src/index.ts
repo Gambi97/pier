@@ -103,7 +103,7 @@ async function main(): Promise<void> {
   );
 
   const targetDir = resolve(values.dir ?? projectName);
-  let infisical = readInfisicalCoordinates(process.env);
+  const infisical = readInfisicalCoordinates(process.env);
 
   if (values['dry-run']) {
     p.log.info(`Dry run — would create Clerk app "${projectName}" and enable:`);
@@ -140,38 +140,21 @@ async function main(): Promise<void> {
   // because keel already provisioned the project — its environments tell
   // pier what the fleet looks like before anything is created on Clerk,
   // and a bad link stops the run while there is still nothing to orphan.
-  if (!infisical && !nonInteractive) {
-    const wants = await p.confirm({
-      message:
-        'No Infisical credentials in this shell. Enter the keel machine identity now? ' +
-        '(No = keys stay only in the local .env.local)',
-    });
-    bailOnCancel(wants);
-    if (wants) {
-      infisical = {
-        host: process.env.INFISICAL_HOST?.trim() || INFISICAL_DEFAULT_HOST,
-        clientId: await askText('INFISICAL_CLIENT_ID (the keel machine identity)'),
-        clientSecret: await askSecret('INFISICAL_CLIENT_SECRET'),
-        projectId: process.env.INFISICAL_PROJECT_ID?.trim() || undefined,
-      } satisfies InfisicalCoordinates;
-    }
-  }
-
   let infisicalClient: InfisicalClient | undefined;
   let infisicalProject: { id: string; environments: string[] } | undefined;
-  if (infisical) {
+
+  if (infisical && nonInteractive) {
+    // --yes: verify once and fail hard — CI has nobody to re-ask.
     const coords = infisical;
     try {
+      infisicalClient = new InfisicalClient(coords);
       infisicalProject = await step(
         spin,
         'Verifying the Infisical link',
         (proj) =>
-          `Infisical project "${projectName}" found — id ${proj.id}, ` +
+          `Infisical connected — project "${projectName}" (${proj.id}), ` +
           `environments: ${proj.environments.join(', ') || '(none)'}`,
-        () => {
-          infisicalClient = new InfisicalClient(coords);
-          return infisicalClient.resolveProject(projectName);
-        },
+        () => infisicalClient!.resolveProject(projectName),
       );
     } catch (error) {
       if (!(error instanceof InfisicalError)) throw error;
@@ -180,6 +163,71 @@ async function main(): Promise<void> {
           'fix the credentials (or run keel first) and re-run pier.',
       );
       process.exit(1);
+    }
+  } else if (!nonInteractive) {
+    let wants = infisical !== undefined;
+    if (!wants) {
+      const answer = await p.confirm({
+        message:
+          'No Infisical credentials in this shell. Enter the keel machine identity now? ' +
+          '(No = keys stay only in the local .env.local)',
+      });
+      bailOnCancel(answer);
+      wants = answer === true;
+    }
+    if (wants) {
+      // keel's own credential block, same structure and copy: host first,
+      // then the machine identity, verified in a loop that re-asks exactly
+      // what failed instead of bailing out of the run.
+      const coords: InfisicalCoordinates = infisical ?? {
+        host: '',
+        clientId: '',
+        clientSecret: '',
+        projectId: process.env.INFISICAL_PROJECT_ID?.trim() || undefined,
+      };
+      // An env-defaulted host was never chosen — ask it like keel does; an
+      // explicit INFISICAL_HOST is respected.
+      if (!process.env.INFISICAL_HOST?.trim()) coords.host = '';
+      for (;;) {
+        if (!coords.host) coords.host = await askInfisicalHost();
+        if (!coords.clientId) {
+          coords.clientId = (await askText('Infisical machine identity client ID')).trim();
+        }
+        if (!coords.clientSecret) {
+          coords.clientSecret = (
+            await askSecret('Infisical machine identity client secret')
+          ).trim();
+        }
+        try {
+          const client = new InfisicalClient(coords);
+          infisicalProject = await step(
+            spin,
+            'Verifying the Infisical link',
+            (proj) =>
+              `Infisical connected — project "${projectName}" (${proj.id}), ` +
+              `environments: ${proj.environments.join(', ') || '(none)'}`,
+            () => client.resolveProject(projectName),
+          );
+          infisicalClient = client;
+          break;
+        } catch (error) {
+          if (!(error instanceof InfisicalError)) throw error;
+          p.log.error(error.message);
+          if (error.field === 'project') {
+            const id = (
+              await askText('Infisical project ID to reuse (leave empty to abort)')
+            ).trim();
+            if (!id) {
+              p.cancel('No Infisical project — run keel first, then re-run pier.');
+              process.exit(1);
+            }
+            coords.projectId = id;
+          } else {
+            coords.clientId = '';
+            coords.clientSecret = '';
+          }
+        }
+      }
     }
   }
 
@@ -473,6 +521,24 @@ async function askSecret(message: string): Promise<string> {
   const answer = await p.password({ message });
   bailOnCancel(answer);
   return answer as string;
+}
+
+/** Host selector, keel's own structure and copy — the credentials only
+ * authenticate on the host keel was bootstrapped against. */
+async function askInfisicalHost(): Promise<string> {
+  const choice = await p.select({
+    message: 'Infisical host',
+    initialValue: 'us',
+    options: [
+      { value: 'us', label: 'US — app.infisical.com', hint: 'default' },
+      { value: 'eu', label: 'EU — eu.infisical.com' },
+      { value: 'other', label: 'Other (self-hosted)' },
+    ],
+  });
+  bailOnCancel(choice);
+  if (choice === 'us') return INFISICAL_DEFAULT_HOST;
+  if (choice === 'eu') return 'https://eu.infisical.com';
+  return (await askText('Infisical host URL')).trim();
 }
 
 async function askMethods(): Promise<string> {

@@ -100,11 +100,14 @@ describe('buildSecretPlan', () => {
 });
 
 describe('InfisicalClient', () => {
-  it('fails login with a typed error', async () => {
+  it('fails login with a typed error pointing at the credentials, naming the host', async () => {
     const { fetcher } = fakeFetch({
       '/auth/universal-auth/login': { status: 401, body: { message: 'bad secret' } },
     });
-    await expect(new InfisicalClient(COORDS, fetcher).login()).rejects.toThrow(/bad secret/);
+    await expect(new InfisicalClient(COORDS, fetcher).login()).rejects.toMatchObject({
+      field: 'credentials',
+      message: expect.stringContaining(COORDS.host),
+    });
   });
 
   it('resolves the project by exact name when no ID is given (keel convention)', async () => {
@@ -135,8 +138,11 @@ describe('InfisicalClient', () => {
       ...LOGIN_OK,
       '/api/v1/workspace': { status: 200, body: { workspaces: [] } },
     });
-    await expect(new InfisicalClient(COORDS, fetcher).resolveProject('pizza')).rejects.toThrow(
-      /run keel first/,
+    await expect(
+      new InfisicalClient(COORDS, fetcher).resolveProject('pizza'),
+    ).rejects.toMatchObject(
+      // field 'project' so the prompt re-asks the project, not the credentials.
+      { field: 'project', message: expect.stringMatching(/run keel first/) },
     );
   });
 
