@@ -188,6 +188,9 @@ async function main(): Promise<void> {
       // An env-defaulted host was never chosen — ask it like keel does; an
       // explicit INFISICAL_HOST is respected.
       if (!process.env.INFISICAL_HOST?.trim()) coords.host = '';
+      // keel asks the project ID in the same block; pier never creates the
+      // project, so its empty answer means find-by-name instead of create.
+      let findByName = false;
       for (;;) {
         if (!coords.host) coords.host = await askInfisicalHost();
         if (!coords.clientId) {
@@ -197,6 +200,16 @@ async function main(): Promise<void> {
           coords.clientSecret = (
             await askSecret('Infisical machine identity client secret')
           ).trim();
+        }
+        if (!coords.projectId && !findByName) {
+          const id = (
+            await askOptionalText(
+              'Infisical project ID to reuse',
+              `empty: find "${projectName}" by name`,
+            )
+          ).trim();
+          if (id) coords.projectId = id;
+          else findByName = true;
         }
         try {
           const client = new InfisicalClient(coords);
@@ -215,7 +228,7 @@ async function main(): Promise<void> {
           p.log.error(error.message);
           if (error.field === 'project') {
             const id = (
-              await askText('Infisical project ID to reuse (leave empty to abort)')
+              await askOptionalText('Infisical project ID to reuse', 'empty: abort')
             ).trim();
             if (!id) {
               p.cancel('No Infisical project — run keel first, then re-run pier.');
@@ -519,6 +532,13 @@ async function askText(message: string): Promise<string> {
 /** Like askText, but masked — for credentials that must not echo. */
 async function askSecret(message: string): Promise<string> {
   const answer = await p.password({ message });
+  bailOnCancel(answer);
+  return answer as string;
+}
+
+/** Like askText, but an empty answer is a valid one (keel's optional asks). */
+async function askOptionalText(message: string, placeholder: string): Promise<string> {
+  const answer = await p.text({ message, placeholder, defaultValue: '' });
   bailOnCancel(answer);
   return answer as string;
 }
