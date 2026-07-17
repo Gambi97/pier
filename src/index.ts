@@ -26,10 +26,17 @@ import {
 } from './infisical.js';
 import { AUTH_METHODS, buildPatch, methodLabel, type AuthMethod } from './methods.js';
 import {
+  SCW_DEFAULT_REGION,
+  SCW_REGIONS,
+  ScalewayError,
+  validateScalewaySecretKey,
+} from './scaleway.js';
+import {
   detectExistingScaffold,
   ensureEmptyTarget,
   initGitRepo,
   planScaffold,
+  writeLockfile,
   writeScaffold,
 } from './scaffold.js';
 
@@ -58,13 +65,15 @@ Credentials:
   INFISICAL_PROJECT_ID / INFISICAL_HOST
                            Optional; default is find-by-name on app.infisical.com.
   SCW_SECRET_KEY / SCW_REGION
-                           Optional (same shell keel ran in): lets Phase D give the
-                           app repo its image-push credential and wiring.
+                           The image-push credential for the app repo's CI
+                           (same shell keel ran in); asked up front when missing
+                           (empty answer: CI builds but skips the registry push).
 
 Order (keel's principle — verify every link first, create last): pier first
 verifies the Infisical link (asking for missing credentials instead of
-skipping) and reads the keel project's environments, then checks the Clerk
-credential, and only then creates: the Clerk application with the chosen auth
+skipping) and reads the keel project's environments, then the GitHub CLI
+login and the Scaleway registry key Phase D will hand the repo, then checks
+the Clerk credential, and only then creates: the Clerk application with the chosen auth
 methods, the keys pushed to keel's Infisical project (dev keys to non-prod
 environments, placeholders to prod, never overwriting), and the DDD-layered
 Next.js app repo with a gitignored .env.local, git-inited. Pier is not a
@@ -247,6 +256,127 @@ async function main(): Promise<void> {
     }
   }
 
+  // Phase 0 (continued) — the links Phase D will need, verified while there
+  // is still nothing to orphan. First the GitHub CLI login (a bad one used
+  // to surface only after the Clerk app, the scaffold and the commit
+  // existed), then the Scaleway registry key the generated CI pushes images
+  // with — asked up front like every other credential, not discovered as a
+  // warning at the end of the run.
+  let skipGithub = values['skip-github'] === true;
+  let publisher: GitHubPublisher | undefined;
+  if (!skipGithub) {
+    publisher = new GitHubPublisher();
+    try {
+      await step(
+        spin,
+        'Verifying the GitHub CLI login',
+        (login) => `GitHub connected — gh is logged in as ${login}`,
+        () => publisher!.verifyAuth(process.cwd()),
+      );
+    } catch (error) {
+      if (!(error instanceof GhError)) throw error;
+      if (nonInteractive) {
+        p.log.error(
+          `GitHub verification failed (${error.message}). Nothing was created — run ` +
+            '`gh auth login` (or pass --skip-github) and re-run pier.',
+        );
+        process.exit(1);
+      }
+      const proceed = await p.confirm({
+        message: `GitHub CLI not ready (${error.message}). Continue without the GitHub publish?`,
+      });
+      bailOnCancel(proceed);
+      if (!proceed) {
+        p.cancel('Run `gh auth login`, then re-run pier. Nothing was created.');
+        process.exit(1);
+      }
+      skipGithub = true;
+      p.log.warn('GitHub publish descoped — re-run pier after `gh auth login` to publish.');
+    }
+  }
+
+  // The registry key only matters when Phase D runs (it becomes a repo
+  // secret). Same contract as Infisical: env values are respected, missing
+  // ones are asked — but this one is legitimately optional, so an empty
+  // answer means "CI builds, push wired up later", stated now, not at the end.
+  let scwSecretKey = process.env.SCW_SECRET_KEY?.trim() || undefined;
+  let scwRegion = process.env.SCW_REGION?.trim() || '';
+  let registryNamespaces: string[] = [];
+  if (!skipGithub) {
+    if (scwRegion && !(SCW_REGIONS as readonly string[]).includes(scwRegion)) {
+      if (nonInteractive) {
+        p.log.error(
+          `SCW_REGION "${scwRegion}" is not a keel region (${SCW_REGIONS.join(', ')}). ` +
+            'Nothing was created — fix it and re-run pier.',
+        );
+        process.exit(1);
+      }
+      p.log.warn(`SCW_REGION "${scwRegion}" is not a keel region — pick one.`);
+      scwRegion = '';
+    }
+    if (!scwSecretKey && !nonInteractive) {
+      scwSecretKey =
+        (
+          await askSecret(
+            'Scaleway secret key (empty: CI builds images but skips the registry push)',
+          )
+        ).trim() || undefined;
+    }
+    if (scwSecretKey) {
+      if (!scwRegion) scwRegion = nonInteractive ? SCW_DEFAULT_REGION : await askScwRegion();
+      // keel's credential loop: verify with a read-only call, re-ask exactly
+      // what failed instead of bailing out of the run.
+      for (;;) {
+        try {
+          const namespaces = await step(
+            spin,
+            'Verifying the Scaleway registry key',
+            `Scaleway connected — the key can reach the ${scwRegion} Container Registry`,
+            () => validateScalewaySecretKey(scwSecretKey!, scwRegion),
+          );
+          // The project's registries are the ground truth for where CI can
+          // push — say now what CI would otherwise report as a bare `denied`.
+          registryNamespaces = namespaces.filter((ns) => ns.startsWith(`${projectName}-`));
+          if (registryNamespaces.length === 0) {
+            p.log.warn(
+              `No ${projectName}-* registry namespaces yet — keel's first apply creates ` +
+                'them; until then the CI image push will be denied.',
+            );
+          }
+          break;
+        } catch (error) {
+          if (!(error instanceof ScalewayError)) throw error;
+          p.log.error(error.message);
+          if (nonInteractive) {
+            p.log.error('Nothing was created — fix SCW_SECRET_KEY and re-run pier.');
+            process.exit(1);
+          }
+          if (error.code === 'auth') {
+            scwSecretKey =
+              (
+                await askSecret('Scaleway secret key (empty: skip the registry-push wiring)')
+              ).trim() || undefined;
+            if (!scwSecretKey) break;
+          } else {
+            const retry = await p.confirm({ message: 'Scaleway API error. Retry?' });
+            bailOnCancel(retry);
+            if (!retry) {
+              p.cancel('Cancelled. Nothing was created.');
+              process.exit(1);
+            }
+          }
+        }
+      }
+    }
+    if (!scwSecretKey) {
+      p.log.warn(
+        'No Scaleway secret key — CI will build the image but skip the registry push ' +
+          'until the repo gets the SCW_SECRET_KEY secret.',
+      );
+    }
+  }
+  if (!scwRegion) scwRegion = SCW_DEFAULT_REGION;
+
   const platformKey = validatePlatformKey(process.env.CLERK_PLATFORM_API_KEY);
 
   const clerk = new ClerkCli(platformKey);
@@ -342,6 +472,21 @@ async function main(): Promise<void> {
       `App repo scaffolded (${Object.keys(files).length} files)`,
       () => writeScaffold(targetDir, files),
     );
+    // The first commit must pass its own CI: npm ci and setup-node's cache
+    // both hard-require a lockfile, and pier pushes before the user ever
+    // runs npm install.
+    const locked = await step(
+      spin,
+      'Resolving package-lock.json (npm, no install)',
+      (ok) => (ok ? 'Lockfile resolved — the first CI run can npm ci' : 'No lockfile'),
+      () => writeLockfile(targetDir),
+    );
+    if (!locked) {
+      p.log.warn(
+        'Could not resolve package-lock.json (npm missing or offline) — the generated CI ' +
+          'requires it: run `npm install` and commit the lockfile before pushing.',
+      );
+    }
   }
 
   const envLocal = join(targetDir, '.env.local');
@@ -378,7 +523,24 @@ async function main(): Promise<void> {
   // project were verified in Phase 0 — this only pushes. Along the way, pick
   // up the APP_URL keel's pipeline synced for each non-prod environment.
   // Known since Phase 0 — the CI wiring gets them even when the push fails.
-  const nonProdEnvs = infisicalProject?.environments.filter((slug) => slug !== PROD_SLUG);
+  //
+  // Which environments? keel's registries, not Infisical's list: an
+  // Infisical project keeps a default `dev` environment keel never
+  // provisioned, and CI pushing to a registry that will never exist is a
+  // bare `denied`. Only before keel's first apply (no registries yet, and
+  // Phase 0 already said so) does the Infisical list stand in.
+  const keelEnvs = registryNamespaces.map((ns) => ns.slice(projectName.length + 1));
+  const envSource = keelEnvs.length > 0 ? keelEnvs : (infisicalProject?.environments ?? []);
+  const nonProdEnvs = envSource.filter((slug) => slug !== PROD_SLUG);
+  if (keelEnvs.length > 0 && infisicalProject) {
+    const ignored = infisicalProject.environments.filter((e) => !keelEnvs.includes(e));
+    if (ignored.length > 0) {
+      p.log.info(
+        `Infisical environments with no keel registry: ${ignored.join(', ')} — ` +
+          'left out of the CI push list (keel never provisioned them).',
+      );
+    }
+  }
   let appUrls: string[] = [];
   if (!infisicalClient || !infisicalProject) {
     p.log.info(
@@ -468,8 +630,14 @@ async function main(): Promise<void> {
   }
 
   // Phase D — hand the repo over to GitHub and wire its image-push CI.
-  if (values['skip-github']) {
-    p.log.info('GitHub publish skipped (--skip-github).');
+  // The gh login and the registry key were settled in Phase 0; this only
+  // spends them.
+  if (skipGithub) {
+    p.log.info(
+      values['skip-github']
+        ? 'GitHub publish skipped (--skip-github).'
+        : 'GitHub publish skipped (gh was not ready — see Phase 0).',
+    );
   } else if (!gitReady) {
     p.log.warn('Skipping the GitHub publish: the repo has no commit yet.');
   } else {
@@ -479,28 +647,29 @@ async function main(): Promise<void> {
     const repoName = values.repo?.trim() || projectName;
     const repoSlug = values.owner ? `${values.owner}/${repoName}` : repoName;
     try {
-      const publisher = new GitHubPublisher();
       const repoUrl = await step(
         spin,
         'Publishing to GitHub (private repo)',
         (url) => `On GitHub: ${url}`,
-        () => publisher.publish(targetDir, repoSlug),
+        () => publisher!.publish(targetDir, repoSlug),
       );
       void repoUrl;
-      const region = process.env.SCW_REGION?.trim() || 'fr-par';
-      await publisher.setVariable(targetDir, 'SCW_REGION', region);
-      await publisher.setVariable(targetDir, 'PROJECT_NAME', projectName);
+      await publisher!.setVariable(targetDir, 'SCW_REGION', scwRegion);
+      await publisher!.setVariable(targetDir, 'PROJECT_NAME', projectName);
       if (nonProdEnvs && nonProdEnvs.length > 0) {
-        await publisher.setVariable(targetDir, 'KEEL_NON_PROD_ENVIRONMENTS', nonProdEnvs.join(' '));
+        await publisher!.setVariable(
+          targetDir,
+          'KEEL_NON_PROD_ENVIRONMENTS',
+          nonProdEnvs.join(' '),
+        );
       }
-      const scwSecretKey = process.env.SCW_SECRET_KEY?.trim();
       if (scwSecretKey) {
-        await publisher.setSecret(targetDir, 'SCW_SECRET_KEY', scwSecretKey);
+        await publisher!.setSecret(targetDir, 'SCW_SECRET_KEY', scwSecretKey);
         p.log.info('Image-push CI configured (SCW_SECRET_KEY secret + registry variables).');
       } else {
         p.log.warn(
-          'SCW_SECRET_KEY not in this shell — CI will build the image but skip the registry ' +
-            `push until you run: gh secret set SCW_SECRET_KEY (in ${targetDir}).`,
+          'No Scaleway secret key was given — complete the CI wiring later with: ' +
+            `gh secret set SCW_SECRET_KEY (in ${targetDir}).`,
         );
       }
     } catch (error) {
@@ -578,6 +747,17 @@ async function askInfisicalHost(): Promise<string> {
   if (choice === 'us') return INFISICAL_DEFAULT_HOST;
   if (choice === 'eu') return 'https://eu.infisical.com';
   return (await askText('Infisical host URL')).trim();
+}
+
+/** Region selector, keel's own list — the registries live where keel put them. */
+async function askScwRegion(): Promise<string> {
+  const choice = await p.select({
+    message: 'Scaleway region (the one keel deployed to)',
+    initialValue: SCW_DEFAULT_REGION as string,
+    options: SCW_REGIONS.map((r) => ({ value: r as string, label: r })),
+  });
+  bailOnCancel(choice);
+  return choice as string;
 }
 
 async function askMethods(): Promise<string> {

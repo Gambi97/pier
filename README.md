@@ -336,10 +336,12 @@ Missing these? Pier skips the push loudly and still scaffolds the app.
 <summary><b>Scaleway + GitHub</b> (for Phase D)</summary>
 <br>
 
-- `SCW_SECRET_KEY` / `SCW_REGION` — optional (same shell keel ran in): lets
-  Phase D give the app repo its image-push credential and registry wiring.
-- `gh` authenticated — to create and push the private app repo. Skip Phase D
-  entirely with `--skip-github`.
+- `SCW_SECRET_KEY` / `SCW_REGION` — the image-push credential for the app
+  repo's CI (same shell keel ran in). Missing values are asked up front and
+  the key is verified against the Container Registry before anything is
+  created; an empty answer means CI builds but skips the registry push.
+- `gh` authenticated — to create and push the private app repo. The login is
+  verified up front, too. Skip Phase D entirely with `--skip-github`.
 
 </details>
 
@@ -440,8 +442,9 @@ Credentials:
   INFISICAL_PROJECT_ID / INFISICAL_HOST
                            Optional; default is find-by-name on app.infisical.com.
   SCW_SECRET_KEY / SCW_REGION
-                           Optional (same shell keel ran in): lets Phase D give the
-                           app repo its image-push credential and wiring.
+                           The image-push credential for the app repo's CI
+                           (same shell keel ran in); asked up front when missing
+                           (empty answer: CI builds but skips the registry push).
 ```
 
 ## Development

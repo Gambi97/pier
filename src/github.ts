@@ -68,6 +68,18 @@ export class GitHubPublisher {
   }
 
   /**
+   * Phase 0 check — gh is installed and its stored login still works.
+   * A harmless read (the authenticated user) that fails exactly the way
+   * Phase D would, while there is still nothing half-published to orphan.
+   * Returns the login for the "connected as" line.
+   */
+  async verifyAuth(cwd: string): Promise<string> {
+    const login = (await this.gh(['api', 'user', '--jq', '.login'], cwd)).trim();
+    if (!login) throw new GhError('gh answered without a login — run `gh auth status`.');
+    return login;
+  }
+
+  /**
    * Creates the private repo and pushes; when the directory is already
    * linked to a GitHub repo (re-run) it just reports that repo's URL —
    * pushing day-2 commits is normal git flow, not pier's business.

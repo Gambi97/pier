@@ -102,6 +102,25 @@ export async function writeScaffold(dir: string, files: Record<string, string>):
 }
 
 /**
+ * Resolve the dependency tree into a package-lock.json without installing
+ * anything (`--package-lock-only`): the generated CI's `npm ci` and
+ * setup-node's npm cache both refuse to run without a lockfile, so the
+ * first commit must carry it or the scaffold is born red. Best-effort like
+ * initGitRepo — no npm or no network returns false and the caller warns.
+ */
+export async function writeLockfile(dir: string): Promise<boolean> {
+  return new Promise((resolve) => {
+    const child = spawn(
+      'npm',
+      ['install', '--package-lock-only', '--ignore-scripts', '--no-audit', '--no-fund'],
+      { cwd: dir, stdio: 'ignore' },
+    );
+    child.on('error', () => resolve(false));
+    child.on('close', (code) => resolve(code === 0));
+  });
+}
+
+/**
  * Best-effort `git init` + first commit; returns false instead of throwing
  * (no git, no identity configured, ...) — the scaffold is complete either
  * way and the caller just tells the user to commit by hand.

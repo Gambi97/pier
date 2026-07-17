@@ -78,6 +78,19 @@ describe('GitHubPublisher', () => {
     );
   });
 
+  it('verifyAuth returns the logged-in account', async () => {
+    const { runner, calls } = fakeGh(() => ok('gambi97\n'));
+    await expect(new GitHubPublisher(runner).verifyAuth('/tmp')).resolves.toBe('gambi97');
+    expect(calls[0]!.args).toEqual(['api', 'user', '--jq', '.login']);
+  });
+
+  it('verifyAuth maps a dead login to a GhError', async () => {
+    const { runner } = fakeGh(() => fail('HTTP 401: Bad credentials'));
+    await expect(new GitHubPublisher(runner).verifyAuth('/tmp')).rejects.toThrow(
+      new GhError('HTTP 401: Bad credentials'),
+    );
+  });
+
   it('surfaces the first stderr line of a failure', async () => {
     const { runner } = fakeGh((args) =>
       args[1] === 'view' ? fail('x') : fail('HTTP 403: rate limited\nmore detail'),
