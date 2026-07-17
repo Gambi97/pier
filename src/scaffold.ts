@@ -36,8 +36,10 @@ export function planScaffold(projectName: string): Record<string, string> {
     'src/domain/README.md': DOMAIN_README,
     'src/application/README.md': APPLICATION_README,
     'src/application/ports/authenticated-user.ts': AUTHENTICATED_USER_PORT,
+    'src/application/ports/current-user-provider.ts': CURRENT_USER_PORT,
     'src/infrastructure/README.md': INFRASTRUCTURE_README,
     'src/infrastructure/auth/clerk-current-user.ts': CLERK_ADAPTER,
+    'src/composition.ts': COMPOSITION_ROOT,
     'src/app/layout.tsx': layout(projectName),
     'src/app/theme.ts': THEME,
     'src/app/globals.css': GLOBALS_CSS,
@@ -306,7 +308,9 @@ Use cases and ports. Orchestrates the domain; owns the interfaces
 Rules:
 
 - May import from \`domain\` only.
-- Ports are defined here, implemented in \`infrastructure\`.
+- Ports are defined here (\`ports/current-user-provider.ts\`), implemented in
+  \`infrastructure\`, and bound to a concrete adapter only in the composition
+  root (\`src/composition.ts\`).
 - Nothing provider-specific: \`ports/authenticated-user.ts\` is the only view
   of the signed-in user the inner layers ever see.
 `;
@@ -323,6 +327,30 @@ export interface AuthenticatedUser {
 }
 `;
 
+const CURRENT_USER_PORT = `import type { AuthenticatedUser } from './authenticated-user';
+
+/**
+ * Driven port: how this application asks "who is acting?". Defined here,
+ * implemented in infrastructure, bound to a concrete adapter in the
+ * composition root (src/composition.ts). Nothing outside infrastructure
+ * may depend on the implementation.
+ */
+export interface CurrentUserProvider {
+  getCurrentUser(): Promise<AuthenticatedUser | null>;
+}
+`;
+
+const COMPOSITION_ROOT = `import type { CurrentUserProvider } from '@/application/ports/current-user-provider';
+import { clerkCurrentUser } from '@/infrastructure/auth/clerk-current-user';
+
+/**
+ * Composition root — the ONLY file where ports meet their concrete
+ * adapters. Everything else (pages, use cases) depends on the port types.
+ * Swapping the auth provider = write a new adapter + change one line here.
+ */
+export const currentUserProvider: CurrentUserProvider = clerkCurrentUser;
+`;
+
 const INFRASTRUCTURE_README = `# Infrastructure
 
 Adapters: implementations of the application layer's ports against real
@@ -331,28 +359,35 @@ providers (auth, persistence, ...).
 Rules:
 
 - May import from \`application\` and \`domain\`; nothing imports back.
+- Every adapter here implements a port owned by the application layer.
 - \`auth/\` is the only place the auth provider is named. Swapping providers
-  means rewriting this folder and the interface edge — never the layers above.
+  means writing a sibling adapter and re-binding it in \`src/composition.ts\`
+  — never touching the layers above. Only the composition root may import
+  from this folder.
 `;
 
 const CLERK_ADAPTER = `import { currentUser } from '@clerk/nextjs/server';
 
 import type { AuthenticatedUser } from '@/application/ports/authenticated-user';
+import type { CurrentUserProvider } from '@/application/ports/current-user-provider';
 
 /**
- * Clerk adapter behind the auth seam. This file (and the interface layer)
- * is the entire provider surface: swapping Clerk for another provider must
- * not touch src/domain or src/application.
+ * Clerk adapter implementing the CurrentUserProvider port. This file (and
+ * the interface layer's Clerk components) is the entire provider surface:
+ * swapping providers means writing a sibling adapter and re-binding the
+ * port in src/composition.ts — src/domain and src/application never move.
  */
-export async function getCurrentUser(): Promise<AuthenticatedUser | null> {
-  const user = await currentUser();
-  if (!user) return null;
-  return {
-    id: user.id,
-    email: user.primaryEmailAddress?.emailAddress,
-    displayName: user.fullName ?? user.username ?? undefined,
-  };
-}
+export const clerkCurrentUser: CurrentUserProvider = {
+  async getCurrentUser(): Promise<AuthenticatedUser | null> {
+    const user = await currentUser();
+    if (!user) return null;
+    return {
+      id: user.id,
+      email: user.primaryEmailAddress?.emailAddress,
+      displayName: user.fullName ?? user.username ?? undefined,
+    };
+  },
+};
 `;
 
 function layout(projectName: string): string {
@@ -488,14 +523,15 @@ export default function SignUpPage() {
 }
 `;
 
-const DASHBOARD_PAGE = `import { getCurrentUser } from '@/infrastructure/auth/clerk-current-user';
+const DASHBOARD_PAGE = `import { currentUserProvider } from '@/composition';
 
 /**
  * Example protected route. src/proxy.ts already guards /dashboard; the page
- * itself only talks to the app-owned seam, never to the provider directly.
+ * itself depends on the port (via the composition root), never on the
+ * provider or its adapter directly.
  */
 export default async function DashboardPage() {
-  const user = await getCurrentUser();
+  const user = await currentUserProvider.getCurrentUser();
   if (!user) return null;
   return (
     <main>
@@ -584,17 +620,22 @@ a dependency of this repo; everything here is yours.
 ## Layout
 
 - \`src/domain\` — the core model. No framework, no provider, no I/O.
-- \`src/application\` — use cases and ports. \`ports/authenticated-user.ts\`
-  is the only view of the signed-in user the inner layers see.
-- \`src/infrastructure\` — adapters. \`auth/\` is the only place the auth
-  provider is named.
+- \`src/application\` — use cases and ports. \`ports/\` owns the interfaces
+  (\`CurrentUserProvider\`) and the \`AuthenticatedUser\` view — the only
+  shape of the signed-in user the inner layers see.
+- \`src/infrastructure\` — adapters implementing the application's ports.
+  \`auth/\` is the only place the auth provider is named.
+- \`src/composition.ts\` — the composition root: the one file where ports
+  are bound to concrete adapters.
 - \`src/app\` + \`src/proxy.ts\` — the Next.js interface layer: routing,
-  pages, route protection.
+  pages, route protection. Depends on ports via the composition root, never
+  on adapters directly.
 
-The rule that keeps the layout honest: **nothing under \`src/domain\` or
-\`src/application\` may import the auth provider.** Swapping Clerk for
-another provider touches \`src/infrastructure/auth\` and the interface layer
-only.
+Two rules keep the layout honest, both enforced by pier's tests: **nothing
+under \`src/domain\` or \`src/application\` may import the auth provider**,
+and **only the composition root may import from \`src/infrastructure\`**.
+Swapping Clerk for another provider = a sibling adapter, one line in
+\`src/composition.ts\`, and the interface-layer Clerk components.
 
 ## Develop
 

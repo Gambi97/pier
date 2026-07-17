@@ -54,6 +54,21 @@ describe('planScaffold', () => {
     }
   });
 
+  it('keeps it hexagonal: the adapter implements the port, and only the composition root imports infrastructure', () => {
+    expect(FILES['src/application/ports/current-user-provider.ts']).toContain(
+      'interface CurrentUserProvider',
+    );
+    expect(FILES['src/infrastructure/auth/clerk-current-user.ts']).toContain(
+      ': CurrentUserProvider',
+    );
+    for (const [path, content] of Object.entries(FILES)) {
+      if (!content.includes("from '@/infrastructure/")) continue;
+      expect(path, path).toBe('src/composition.ts');
+    }
+    // Pages reach the port through the composition root.
+    expect(FILES['src/app/dashboard/page.tsx']).toContain("from '@/composition'");
+  });
+
   it('does not make pier a dependency of the generated repo', () => {
     const pkg = JSON.parse(FILES['package.json']!) as {
       dependencies: Record<string, string>;
