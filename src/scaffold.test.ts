@@ -1,3 +1,4 @@
+import { spawnSync } from 'node:child_process';
 import { mkdtemp, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -62,6 +63,9 @@ describe('planScaffold', () => {
       ': CurrentUserProvider',
     );
     for (const [path, content] of Object.entries(FILES)) {
+      // The rule is scoped to src/ — the boundary-check script itself
+      // contains the detection string, and it lives in scripts/.
+      if (!path.startsWith('src/')) continue;
       if (!content.includes("from '@/infrastructure/")) continue;
       expect(path, path).toBe('src/composition.ts');
     }
@@ -133,6 +137,37 @@ describe('writeScaffold', () => {
       'utf8',
     );
     expect(adapter).toContain('@clerk/nextjs/server');
+  });
+
+  it('ships the boundary rules with the repo, and they actually bite', async () => {
+    // The generated CI must run the check — rules travel with the handoff.
+    expect(FILES['.github/workflows/ci.yml']).toContain('npm run check:boundaries');
+
+    const base = await mkdtemp(join(tmpdir(), 'pier-bounds-'));
+    const dir = join(base, 'app');
+    await writeScaffold(dir, FILES);
+    const run = () =>
+      spawnSync('node', ['scripts/check-boundaries.mjs'], { cwd: dir, encoding: 'utf8' });
+
+    // Clean scaffold passes.
+    expect(run().status, run().stderr).toBe(0);
+
+    // A provider leak into the inner layers fails the build...
+    const leak = join(dir, 'src/domain/bad.ts');
+    await writeFile(leak, "import { currentUser } from '@clerk/nextjs/server';\n");
+    const leaked = run();
+    expect(leaked.status).toBe(1);
+    expect(leaked.stderr).toContain('inner layers must not mention the auth provider');
+    await writeFile(leak, 'export {};\n');
+
+    // ...and so does bypassing the composition root.
+    await writeFile(
+      join(dir, 'src/app/sneaky.ts'),
+      "import { clerkCurrentUser } from '@/infrastructure/auth/clerk-current-user';\n",
+    );
+    const bypassed = run();
+    expect(bypassed.status).toBe(1);
+    expect(bypassed.stderr).toContain('only src/composition.ts may import from infrastructure');
   });
 
   it('recognizes its own scaffold for idempotent re-runs', async () => {

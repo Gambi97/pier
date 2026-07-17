@@ -40,6 +40,7 @@ export function planScaffold(projectName: string): Record<string, string> {
     'src/infrastructure/README.md': INFRASTRUCTURE_README,
     'src/infrastructure/auth/clerk-current-user.ts': CLERK_ADAPTER,
     'src/composition.ts': COMPOSITION_ROOT,
+    'scripts/check-boundaries.mjs': BOUNDARY_CHECK,
     'src/app/layout.tsx': layout(projectName),
     'src/app/theme.ts': THEME,
     'src/app/globals.css': GLOBALS_CSS,
@@ -129,6 +130,7 @@ function packageJson(projectName: string): string {
           build: 'next build',
           start: 'next start',
           typecheck: 'tsc --noEmit',
+          'check:boundaries': 'node scripts/check-boundaries.mjs',
         },
         dependencies: {
           '@clerk/nextjs': '^7.5.19',
@@ -338,6 +340,60 @@ const CURRENT_USER_PORT = `import type { AuthenticatedUser } from './authenticat
 export interface CurrentUserProvider {
   getCurrentUser(): Promise<AuthenticatedUser | null>;
 }
+`;
+
+/**
+ * The architecture rules, shipped WITH the repo so they survive the
+ * handoff to other devs — pier's own tests enforce them at generation
+ * time, this script re-enforces them in the app's CI forever after.
+ * Dependency-free on purpose.
+ */
+const BOUNDARY_CHECK = `#!/usr/bin/env node
+/**
+ * Architecture boundary check — run by CI (and \`npm run check:boundaries\`).
+ *
+ * Two rules keep this repo's layout honest:
+ *   1. Inner layers (src/domain, src/application) never mention the auth
+ *      provider. They see the signed-in user only as AuthenticatedUser.
+ *   2. Only the composition root (src/composition.ts) may import from
+ *      src/infrastructure — everything else depends on ports.
+ *
+ * If this script fails your build, the fix is almost always: define/extend
+ * a port in src/application/ports, implement it in src/infrastructure,
+ * bind it in src/composition.ts.
+ */
+import { readdirSync, readFileSync, statSync } from 'node:fs';
+import { join } from 'node:path';
+
+const walk = (dir) =>
+  readdirSync(dir).flatMap((name) => {
+    const p = join(dir, name);
+    return statSync(p).isDirectory() ? walk(p) : [p];
+  });
+
+const violations = [];
+for (const file of walk('src')) {
+  if (!/\\.(ts|tsx)$/.test(file)) continue;
+  const rel = file.split('\\\\').join('/');
+  const content = readFileSync(file, 'utf8');
+  const inner = rel.startsWith('src/domain/') || rel.startsWith('src/application/');
+  if (inner && /clerk/i.test(content)) {
+    violations.push(rel + ': inner layers must not mention the auth provider');
+  }
+  if (rel !== 'src/composition.ts' && content.includes("from '@/infrastructure/")) {
+    violations.push(rel + ': only src/composition.ts may import from infrastructure');
+  }
+}
+
+if (violations.length > 0) {
+  console.error('Architecture boundary violations:');
+  for (const v of violations) console.error('  - ' + v);
+  console.error('\\nSee scripts/check-boundaries.mjs for the rules and the fix.');
+  process.exit(1);
+}
+console.log(
+  'Boundaries OK: inner layers are provider-free; infrastructure is imported only by the composition root.',
+);
 `;
 
 const COMPOSITION_ROOT = `import type { CurrentUserProvider } from '@/application/ports/current-user-provider';
@@ -571,6 +627,7 @@ jobs:
           node-version: 24
           cache: npm
       - run: npm ci
+      - run: npm run check:boundaries
       - run: npm run typecheck
       - name: Build (dummy publishable key — real keys are runtime-injected)
         env:
@@ -631,11 +688,13 @@ a dependency of this repo; everything here is yours.
   pages, route protection. Depends on ports via the composition root, never
   on adapters directly.
 
-Two rules keep the layout honest, both enforced by pier's tests: **nothing
-under \`src/domain\` or \`src/application\` may import the auth provider**,
-and **only the composition root may import from \`src/infrastructure\`**.
-Swapping Clerk for another provider = a sibling adapter, one line in
-\`src/composition.ts\`, and the interface-layer Clerk components.
+Two rules keep the layout honest, **enforced by this repo's own CI**
+(\`npm run check:boundaries\`, see \`scripts/check-boundaries.mjs\`):
+**nothing under \`src/domain\` or \`src/application\` may import the auth
+provider**, and **only the composition root may import from
+\`src/infrastructure\`**. Swapping Clerk for another provider = a sibling
+adapter, one line in \`src/composition.ts\`, and the interface-layer Clerk
+components.
 
 ## Develop
 
