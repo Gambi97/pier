@@ -7,21 +7,26 @@ import { AUTH_METHODS, buildPatch } from './methods.js';
 const LIVE_SCHEMA = ['connection_oauth_google', 'auth_password', 'auth_email', 'session'];
 
 describe('buildPatch', () => {
-  it('enables google as a connection toggle', () => {
+  it('enables google as a connection toggle — and writes password OFF (Clerk default is on)', () => {
     const plan = buildPatch(['google'], LIVE_SCHEMA);
-    expect(plan.patch).toEqual({ connection_oauth_google: { enabled: true } });
+    expect(plan.patch).toEqual({
+      connection_oauth_google: { enabled: true },
+      auth_password: { enabled: false, required: false },
+    });
     expect(plan.dropped).toEqual([]);
   });
 
   it('enables password under its own top-level key, with the verified-email base', () => {
     const plan = buildPatch(['password'], LIVE_SCHEMA);
     expect(plan.patch).toEqual({
+      connection_oauth_google: { enabled: false },
       auth_password: { enabled: true },
       auth_email: {
         used_for_sign_up: true,
         required_for_sign_up: true,
         verify_at_sign_up: true,
         verification_strategies: ['email_code'],
+        used_for_sign_in: false,
       },
     });
   });
@@ -29,6 +34,8 @@ describe('buildPatch', () => {
   it('models magic link and OTP as one sign_in_strategies array, not merged toggles', () => {
     const plan = buildPatch(['magic-link', 'email-otp'], LIVE_SCHEMA);
     expect(plan.patch).toEqual({
+      connection_oauth_google: { enabled: false },
+      auth_password: { enabled: false, required: false },
       auth_email: {
         used_for_sign_up: true,
         required_for_sign_up: true,
@@ -38,6 +45,16 @@ describe('buildPatch', () => {
         sign_in_strategies: ['email_code', 'email_link'],
       },
     });
+  });
+
+  it('writes the unselected password off for the exact google+email-otp selection', () => {
+    // The live regression: google+email-otp left Clerk's default password
+    // sign-up (enabled AND required) in place — the form asked a password.
+    const plan = buildPatch(['google', 'email-otp'], LIVE_SCHEMA);
+    expect(plan.patch.auth_password).toEqual({ enabled: false, required: false });
+    expect((plan.patch.auth_email as { sign_in_strategies: string[] }).sign_in_strategies).toEqual([
+      'email_code',
+    ]);
   });
 
   it('composes the full v1 selection', () => {

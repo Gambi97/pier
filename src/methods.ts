@@ -59,17 +59,19 @@ export function buildPatch(methods: AuthMethod[], schemaKeys: string[]): PatchPl
   const dropped: AuthMethod[] = [];
   const warnings: string[] = [];
 
-  if (selected.has('google')) {
-    if (known.has('connection_oauth_google')) {
-      patch.connection_oauth_google = { enabled: true };
-    } else dropped.push('google');
-  }
+  // Declarative on toggles too: the selection is the whole truth. Clerk
+  // creates applications with password sign-in enabled (and required), so an
+  // unselected method must be written off, not skipped — enable-only
+  // patching shipped a password field nobody asked for.
+  if (known.has('connection_oauth_google')) {
+    patch.connection_oauth_google = { enabled: selected.has('google') };
+  } else if (selected.has('google')) dropped.push('google');
 
-  if (selected.has('password')) {
-    if (known.has('auth_password')) {
-      patch.auth_password = { enabled: true };
-    } else dropped.push('password');
-  }
+  if (known.has('auth_password')) {
+    patch.auth_password = selected.has('password')
+      ? { enabled: true }
+      : { enabled: false, required: false };
+  } else if (selected.has('password')) dropped.push('password');
 
   const strategies: string[] = [];
   if (selected.has('email-otp')) strategies.push('email_code');
@@ -85,9 +87,11 @@ export function buildPatch(methods: AuthMethod[], schemaKeys: string[]): PatchPl
         required_for_sign_up: true,
         verify_at_sign_up: true,
         verification_strategies: ['email_code'],
+        // Declarative here as well: password-only must switch the default
+        // passwordless strategies off, not inherit them.
         ...(strategies.length > 0
           ? { used_for_sign_in: true, sign_in_strategies: strategies }
-          : {}),
+          : { used_for_sign_in: false }),
       };
     } else {
       for (const m of ['magic-link', 'email-otp'] as const) {
