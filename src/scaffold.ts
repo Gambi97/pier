@@ -64,10 +64,14 @@ export async function ensureEmptyTarget(dir: string): Promise<void> {
   if (!info.isDirectory()) {
     throw new ConfigError(`Target "${dir}" exists and is not a directory.`);
   }
-  if ((await readdir(dir)).length > 0) {
+  // A freshly created + cloned empty repo carries a `.git` and nothing else —
+  // pier is meant to run inside exactly that, so `.git` never counts as
+  // content. Anything else does.
+  const entries = (await readdir(dir)).filter((e) => e !== '.git');
+  if (entries.length > 0) {
     throw new ConfigError(
-      `Target directory "${dir}" is not empty. Pier only scaffolds into a new or empty ` +
-        'directory — pick another with --dir.',
+      `Target directory "${dir}" is not empty. Pier scaffolds into the (empty) repo it runs ` +
+        'in — start from a repo with no files, or point --dir at an empty directory.',
     );
   }
 }
@@ -106,7 +110,7 @@ export async function writeScaffold(dir: string, files: Record<string, string>):
  * anything (`--package-lock-only`): the generated CI's `npm ci` and
  * setup-node's npm cache both refuse to run without a lockfile, so the
  * first commit must carry it or the scaffold is born red. Best-effort like
- * initGitRepo — no npm or no network returns false and the caller warns.
+ * commitScaffold — no npm or no network returns false and the caller warns.
  */
 export async function writeLockfile(dir: string): Promise<boolean> {
   return new Promise((resolve) => {
@@ -121,21 +125,29 @@ export async function writeLockfile(dir: string): Promise<boolean> {
 }
 
 /**
- * Best-effort `git init` + first commit; returns false instead of throwing
- * (no git, no identity configured, ...) — the scaffold is complete either
- * way and the caller just tells the user to commit by hand.
+ * Best-effort first commit; returns false instead of throwing (no git, no
+ * identity configured, ...) — the scaffold is complete either way and the
+ * caller just tells the user to commit by hand.
+ *
+ * Pier runs inside the repo you created and cloned, so `.git` and `origin`
+ * already exist — this only stages and commits (a cloned-empty repo's unborn
+ * `main` becomes the first commit). If pier is somehow run outside a repo it
+ * inits one, so the local scaffold is still a committed starting point; Phase
+ * D then finds no origin and is skipped.
  */
-export async function initGitRepo(dir: string): Promise<boolean> {
+export async function commitScaffold(dir: string): Promise<boolean> {
   const git = (args: string[]) =>
     new Promise<boolean>((resolve) => {
       const child = spawn('git', args, { cwd: dir, stdio: 'ignore' });
       child.on('error', () => resolve(false));
       child.on('close', (code) => resolve(code === 0));
     });
+  const isRepo = await stat(join(dir, '.git'))
+    .then(() => true)
+    .catch(() => false);
+  if (!isRepo && !(await git(['init', '-b', 'main']))) return false;
   return (
-    (await git(['init', '-b', 'main'])) &&
-    (await git(['add', '-A'])) &&
-    (await git(['commit', '-m', 'Scaffold auth-ready app (pier)']))
+    (await git(['add', '-A'])) && (await git(['commit', '-m', 'Scaffold auth-ready app (pier)']))
   );
 }
 
@@ -311,10 +323,10 @@ export default clerkMiddleware(
 );
 
 export const config = {
-  matcher: [
-    '/((?!_next|[^?]*\\\\.(?:html?|css|js(?!on)|jpe?g|webp|png|gif|svg|ttf|woff2?|ico|csv|docx?|xlsx?|zip|webmanifest)).*)',
-    '/(api|trpc)(.*)',
-  ],
+  // Product routes only: public pages never touch Clerk, so they stay up
+  // even while prod's Clerk keys are still the Infisical placeholders
+  // (before the production instance exists). Add new protected areas here.
+  matcher: ['/dashboard(.*)', '/sign-in(.*)', '/sign-up(.*)', '/(api|trpc)(.*)'],
 };
 `;
 

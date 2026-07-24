@@ -20,47 +20,51 @@ function fakeGh(respond: (args: string[]) => GhResult): { runner: GhRunner; call
 const ok = (stdout: string): GhResult => ({ status: 0, stdout, stderr: '' });
 const fail = (stderr: string): GhResult => ({ status: 1, stdout: '', stderr });
 
-/** git stub for a directory with no origin remote at all. */
-const noRemote: GhRunner = () => Promise.resolve(fail('No such remote'));
-
 describe('GitHubPublisher', () => {
-  it('creates the private repo with a push and returns its URL', async () => {
-    const { runner, calls } = fakeGh((args) =>
-      args[0] === 'repo' && args[1] === 'view'
-        ? fail('no git remotes found')
-        : ok('✓ Created repository me/pizza\nhttps://github.com/me/pizza\n'),
-    );
-    const url = await new GitHubPublisher(runner, noRemote).publish('/tmp/app', 'pizza');
-    expect(url).toBe('https://github.com/me/pizza');
-    const create = calls[1]!;
-    expect(create.args).toContain('--private');
-    expect(create.args).toContain('--push');
-    expect(create.cwd).toBe('/tmp/app');
-  });
-
-  it('drops an unusable origin remote before creating (repairs a failed publish)', async () => {
-    const { runner } = fakeGh((args) =>
-      args[1] === 'view' ? fail('Repository not found') : ok('https://github.com/me/pizza\n'),
-    );
-    const gitCalls: string[][] = [];
-    const git: GhRunner = (args) => {
-      gitCalls.push(args);
-      // get-url succeeds (a malformed remote exists), remove succeeds.
-      return Promise.resolve(ok(args[1] === 'get-url' ? 'https://github.com//.git\n' : ''));
-    };
-    const url = await new GitHubPublisher(runner, git).publish('/tmp/app', 'pizza');
-    expect(url).toBe('https://github.com/me/pizza');
-    expect(gitCalls).toEqual([
-      ['remote', 'get-url', 'origin'],
-      ['remote', 'remove', 'origin'],
-    ]);
-  });
-
-  it('reuses an already-published repo on re-runs', async () => {
+  it('resolveRepo returns the URL of the repo pier runs in', async () => {
     const { runner, calls } = fakeGh(() => ok('https://github.com/me/pizza\n'));
-    const url = await new GitHubPublisher(runner).publish('/tmp/app', 'pizza');
+    const url = await new GitHubPublisher(runner).resolveRepo('/tmp/app');
     expect(url).toBe('https://github.com/me/pizza');
-    expect(calls).toHaveLength(1); // no create call
+    expect(calls[0]!.args).toEqual(['repo', 'view', '--json', 'url', '--jq', '.url']);
+    expect(calls[0]!.cwd).toBe('/tmp/app');
+  });
+
+  it('resolveRepo maps an unresolvable directory to a guided GhError', async () => {
+    const { runner } = fakeGh(() => fail('no git remotes found'));
+    await expect(new GitHubPublisher(runner).resolveRepo('/tmp/app')).rejects.toThrow(
+      new GhError('no git remotes found'),
+    );
+    // An empty (but successful) answer is a repo pier cannot push to either.
+    const { runner: blank } = fakeGh(() => ok('\n'));
+    await expect(new GitHubPublisher(blank).resolveRepo('/tmp/app')).rejects.toThrow(
+      /create the repo and clone it/,
+    );
+  });
+
+  it('push publishes the current branch to the existing origin', async () => {
+    const { runner } = fakeGh(() => ok(''));
+    const gitCalls: Call[] = [];
+    const git: GhRunner = (args, opts) => {
+      gitCalls.push({ args, cwd: opts.cwd });
+      return Promise.resolve(ok(''));
+    };
+    await new GitHubPublisher(runner, git).push('/tmp/app');
+    expect(gitCalls).toEqual([{ args: ['push', '-u', 'origin', 'HEAD'], cwd: '/tmp/app' }]);
+  });
+
+  it('push maps a git failure to the first stderr line', async () => {
+    const git: GhRunner = () =>
+      Promise.resolve(fail('! [rejected] main -> main (fetch first)\nmore detail'));
+    await expect(
+      new GitHubPublisher(() => Promise.resolve(ok('')), git).push('/x'),
+    ).rejects.toThrow(new GhError('! [rejected] main -> main (fetch first)'));
+  });
+
+  it('push maps a missing git binary to a guided error', async () => {
+    const git: GhRunner = () => Promise.resolve({ status: 127, stdout: '', stderr: '' });
+    await expect(
+      new GitHubPublisher(() => Promise.resolve(ok('')), git).push('/x'),
+    ).rejects.toThrow(/git not found/);
   });
 
   it('sends secrets via stdin, never argv', async () => {
@@ -91,11 +95,9 @@ describe('GitHubPublisher', () => {
     );
   });
 
-  it('surfaces the first stderr line of a failure', async () => {
-    const { runner } = fakeGh((args) =>
-      args[1] === 'view' ? fail('x') : fail('HTTP 403: rate limited\nmore detail'),
-    );
-    await expect(new GitHubPublisher(runner, noRemote).publish('/x', 'pizza')).rejects.toThrow(
+  it('surfaces the first stderr line of a gh failure', async () => {
+    const { runner } = fakeGh(() => fail('HTTP 403: rate limited\nmore detail'));
+    await expect(new GitHubPublisher(runner).setVariable('/x', 'A', 'b')).rejects.toThrow(
       new GhError('HTTP 403: rate limited'),
     );
   });

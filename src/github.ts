@@ -1,16 +1,19 @@
 import { spawn } from 'node:child_process';
 
 /**
- * Phase D — hand the scaffolded repo over to GitHub, wired for the fleet.
+ * Phase D — fill the GitHub repo pier was launched inside, wired for the
+ * fleet. Pier never creates the repo: you create and clone the (empty) repo
+ * yourself, run pier in it, and pier pushes its scaffold to the existing
+ * origin and configures the CI.
  *
- * Everything shells out to `gh` (already authenticated on the machine that
- * ran keel) and degrades to printed manual commands when it cannot run.
- * Besides creating and pushing the private repo, Phase D configures what
- * the generated CI needs to push images to keel's environment registries:
- * the SCW_SECRET_KEY secret (docker login is `nologin` + secret key, keel's
- * own documented recipe) and the non-sensitive variables. Values come from
- * the same shell environment keel ran in — pier consumes what keel emitted,
- * never the other way around.
+ * Everything shells out to `gh`/`git` (already authenticated on the machine
+ * that ran keel) and degrades to printed manual commands when it cannot run.
+ * Besides pushing the first commit, Phase D configures what the generated CI
+ * needs to push images to keel's environment registries: the SCW_SECRET_KEY
+ * secret (docker login is `nologin` + secret key, keel's own documented
+ * recipe) and the non-sensitive variables. Values come from the same shell
+ * environment keel ran in — pier consumes what keel emitted, never the other
+ * way around.
  */
 
 export class GhError extends Error {}
@@ -43,7 +46,7 @@ const spawnCli =
 
 export const spawnGh: GhRunner = spawnCli('gh');
 
-/** Same shape, spawning `git` — publish uses it to repair a broken remote. */
+/** Same shape, spawning `git` — the push shells out to it. */
 export const spawnGit: GhRunner = spawnCli('git');
 
 export class GitHubPublisher {
@@ -70,7 +73,7 @@ export class GitHubPublisher {
   /**
    * Phase 0 check — gh is installed and its stored login still works.
    * A harmless read (the authenticated user) that fails exactly the way
-   * Phase D would, while there is still nothing half-published to orphan.
+   * Phase D would, while there is still nothing half-configured to orphan.
    * Returns the login for the "connected as" line.
    */
   async verifyAuth(cwd: string): Promise<string> {
@@ -80,28 +83,38 @@ export class GitHubPublisher {
   }
 
   /**
-   * Creates the private repo and pushes; when the directory is already
-   * linked to a GitHub repo (re-run) it just reports that repo's URL —
-   * pushing day-2 commits is normal git flow, not pier's business.
+   * Phase 0 check — the repo pier was launched inside must already exist on
+   * GitHub and resolve from the directory, because pier no longer creates it:
+   * it fills, pushes and wires the repo it lives in. Verified up front, while
+   * there is still nothing to orphan. Returns the repo URL for the handoff.
    */
-  async publish(dir: string, name: string): Promise<string> {
-    const existing = await this.run(['repo', 'view', '--json', 'url', '--jq', '.url'], {
+  async resolveRepo(dir: string): Promise<string> {
+    const url = (await this.gh(['repo', 'view', '--json', 'url', '--jq', '.url'], dir)).trim();
+    if (!url) {
+      throw new GhError(
+        'gh resolved no repo from this directory — create the repo and clone it, then run pier inside it.',
+      );
+    }
+    return url;
+  }
+
+  /**
+   * Push the scaffold's first commit to the existing origin. The repo was
+   * verified reachable in Phase 0; a freshly created, cloned-empty repo has
+   * an unborn `main`, so `-u origin HEAD` publishes the branch and sets its
+   * tracking. Re-runs push nothing new — normal git flow, idempotent.
+   */
+  async push(dir: string): Promise<void> {
+    const { status, stdout, stderr } = await this.runGit(['push', '-u', 'origin', 'HEAD'], {
       cwd: dir,
     });
-    if (existing.status === 0 && existing.stdout.trim()) return existing.stdout.trim();
-    // gh could not resolve a repo from the directory, so any origin remote
-    // sitting there is unusable (a dead or malformed URL from an earlier
-    // failed publish) and would make `repo create --remote origin` refuse
-    // to attach — drop it and let the create own the remote.
-    const origin = await this.runGit(['remote', 'get-url', 'origin'], { cwd: dir });
-    if (origin.status === 0) {
-      await this.runGit(['remote', 'remove', 'origin'], { cwd: dir });
+    if (status === 127) {
+      throw new GhError('git not found — push the repo yourself.');
     }
-    const out = await this.gh(
-      ['repo', 'create', name, '--private', '--source', '.', '--remote', 'origin', '--push'],
-      dir,
-    );
-    return /https:\/\/github\.com\/\S+/.exec(out)?.[0] ?? name;
+    if (status !== 0) {
+      const firstLine = (stderr || stdout).trim().split('\n')[0];
+      throw new GhError(firstLine || `git push failed (${status})`);
+    }
   }
 
   /** Plain Actions variable (non-sensitive wiring, keel's own split). */

@@ -22,18 +22,19 @@
 A pier is the gangway your users walk up to get on board. `pier` builds that
 gangway for whatever you are shipping: it creates the identity application on
 [Clerk](https://clerk.com), pushes the auth coordinates into the secret store
-[keel](https://github.com/Gambi97/keel) already provisioned, and drops a
-DDD-layered [Next.js](https://nextjs.org) app in place — provider, middleware,
-sign-in / sign-up pages, protected routes. You answer a couple of questions,
-and out comes a deployable app repository you fully own.
+[keel](https://github.com/Gambi97/keel) already provisioned, and fills the
+(empty) app repo you run it in with a DDD-layered [Next.js](https://nextjs.org)
+app — provider, middleware, sign-in / sign-up pages, protected routes. You
+create the repo and answer a couple of questions, and out comes a deployable
+app repository you fully own.
 
 Pier is the boarding point in a small fleet: **keel lays the infrastructure
 spine, Pier is the pier people walk up to get on board, the app is the ship.**
 Two reusable run-once bootstrappers, one bespoke app on top.
 
 **Pier runs once, then leaves.** It is a bootstrapper, not a control plane. It
-configures Clerk, wires the secrets, scaffolds the app, hands you the
-repository, and exits. It never becomes a runtime dependency, has nothing to
+configures Clerk, wires the secrets, scaffolds the app into the repo you own,
+pushes it, and exits. It never becomes a runtime dependency, has nothing to
 update, and does not sit in the request path — the generated app talks to Clerk
 directly, behind a seam you own.
 
@@ -54,20 +55,23 @@ directly, behind a seam you own.
 
 You need Node >= 20.9, a Clerk credential, and — from the same shell keel ran
 in — the Infisical and Scaleway coordinates keel emits (see
-[Prerequisites](#prerequisites)). Pier runs **after** keel, against the **app**
-repo, not keel's infrastructure repo.
+[Prerequisites](#prerequisites)). Pier runs **after** keel and **inside the app
+repo**, not keel's infrastructure repo — you create the empty repo, clone it,
+and run pier in it. Pier never creates anything on GitHub.
 
 ```sh
+gh repo create my-app --private --clone   # you own the repo; pier never creates it
+cd my-app
 npx github:Gambi97/pier --name my-app
 ```
 
 Pier asks for the project name (the same one keel used) and the auth methods,
 then walks the four phases: create and configure the Clerk application, push
-the keys to keel's Infisical project, scaffold the Next.js app repo, and publish
-it to GitHub with its image-push CI wired. It reuses what already exists — an
-app carrying the fleet name, a prior pier scaffold, secrets already set — so a
-re-run after keel's first apply is the designed way to pick up freshly synced
-URLs.
+the keys to keel's Infisical project, scaffold the Next.js app into the repo,
+and push it to GitHub with its image-push CI wired. It reuses what already
+exists — an app carrying the fleet name, a prior pier scaffold, secrets already
+set — so a re-run after keel's first apply is the designed way to pick up
+freshly synced URLs.
 
 Non-interactive and dry-run:
 
@@ -79,8 +83,8 @@ npx github:Gambi97/pier --yes --name my-app --methods google,password,magic-link
 npx github:Gambi97/pier --dry-run --yes --name my-app
 ```
 
-See the full [CLI reference](#cli-reference) for all flags. When it finishes:
-`cd my-app && npm install && npm run dev`, and deploy by setting
+See the full [CLI reference](#cli-reference) for all flags. When it finishes,
+from inside the repo: `npm install && npm run dev`, and deploy by setting
 `container_image` in keel's tfvars.
 
 ## Why pier
@@ -146,10 +150,6 @@ SDK.
 - **Behind a seam.** The app reads the current user through an app-owned port,
   so Clerk stays swappable.
 
-**Alternative on file: WorkOS AuthKit**, whose 1M-MAU free tier beats Clerk's
-50k. The switch trigger is scale — reach for WorkOS if apps are expected to blow
-past 50k users; otherwise Clerk's automatability wins.
-
 ### Why a DDD scaffold
 
 The repo Phase C scaffolds is laid out along DDD lines so the "buy the generic"
@@ -161,8 +161,8 @@ opinion is enforced by structure, not discipline:
   `src/proxy.ts`, the sign-in / sign-up pages).
 - Only `src/composition.ts` may wire infrastructure into the application.
 
-Swapping Clerk for WorkOS must not touch `src/domain` or `src/application` — and
-tests enforce it (see [Status](#status)).
+Swapping Clerk for another provider must not touch `src/domain` or
+`src/application` — and tests enforce it (see [Status](#status)).
 
 ## How it works
 
@@ -171,8 +171,8 @@ flowchart TD
     Keel([keel: infrastructure repo + Infisical project]) -->|emits APP_URL,<br/>Infisical coordinates| You([You: npx github:Gambi97/pier])
     You -->|A · clerk CLI| CLERK[Clerk application:<br/>auth methods, allowed origins]
     You -->|B · additive push| INF[(Infisical<br/>keel's project)]
-    You -->|C · scaffold| APP[Next.js app repo<br/>DDD-layered]
-    You -->|D · gh| GH[GitHub app repo<br/>image-push CI]
+    You -->|C · scaffold| APP[Next.js app<br/>DDD-layered, in your repo]
+    You -->|D · git push + gh| GH[Your GitHub repo<br/>image-push CI wired]
     CLERK -.->|dev keys → non-prod envs<br/>placeholders → prod| INF
     GH -->|merge to main / tag vX.Y.Z| REG[(Scaleway registry)]
     INF -.->|CLERK_* injected at runtime by keel| APP
@@ -206,25 +206,25 @@ The push is **additive like keel's**: an existing secret is never overwritten,
 so re-runs cannot clobber a rotated key. Pier never creates the project — keel
 owns it; a missing project means "run keel first".
 
-**Phase C — App scaffold** (Next.js, into a new or empty directory)
+**Phase C — App scaffold** (Next.js, into the empty repo you run pier in)
 
-| What                    | Detail                                                             |
-| ----------------------- | ------------------------------------------------------------------ |
-| `<ClerkProvider>`       | In the root layout, `appearance` wired to a `theme.ts` placeholder |
-| `src/proxy.ts`          | Next 16 middleware protecting `/dashboard`                         |
-| `/sign-in`, `/sign-up`  | Clerk's prebuilt pages                                             |
-| Example protected route | Reads the user through the app-owned seam, not Clerk directly      |
-| `.env.local`            | Git-ignored, filled by `clerk env pull`                            |
-| `git init`              | First commit; Pier is not a dependency of the result               |
+| What                    | Detail                                                              |
+| ----------------------- | ------------------------------------------------------------------- |
+| `<ClerkProvider>`       | In the root layout, `appearance` wired to a `theme.ts` placeholder  |
+| `src/proxy.ts`          | Next 16 middleware protecting `/dashboard`                          |
+| `/sign-in`, `/sign-up`  | Clerk's prebuilt pages                                              |
+| Example protected route | Reads the user through the app-owned seam, not Clerk directly       |
+| `.env.local`            | Git-ignored, filled by `clerk env pull`                             |
+| `git commit`            | First commit into your repo; Pier is not a dependency of the result |
 
-**Phase D — Handoff** (GitHub, via `gh`)
+**Phase D — Handoff** (GitHub, via `git` + `gh`)
 
-| What                | Detail                                                                                           |
-| ------------------- | ------------------------------------------------------------------------------------------------ |
-| Private repo + push | Creates `<project>` and pushes the first commit                                                  |
-| Image-push CI       | `SCW_SECRET_KEY` secret + `SCW_REGION` / `PROJECT_NAME` / `KEEL_NON_PROD_ENVIRONMENTS` variables |
-| One portable image  | Dummy publishable key at build; real `CLERK_*` keys injected at runtime by keel from Infisical   |
-| Deploy contract     | Merge to main → non-prod registries; tag `vX.Y.Z` → prod's — a reviewable `container_image` PR   |
+| What               | Detail                                                                                           |
+| ------------------ | ------------------------------------------------------------------------------------------------ |
+| Push to origin     | Pushes the first commit to the repo you created and cloned into (Pier never creates it)          |
+| Image-push CI      | `SCW_SECRET_KEY` secret + `SCW_REGION` / `PROJECT_NAME` / `KEEL_NON_PROD_ENVIRONMENTS` variables |
+| One portable image | Dummy publishable key at build; real `CLERK_*` keys injected at runtime by keel from Infisical   |
+| Deploy contract    | Merge to main → non-prod registries; tag `vX.Y.Z` → prod's — a reviewable `container_image` PR   |
 
 ## The generated repository
 
@@ -255,8 +255,9 @@ nothing else.
 
 Pier docks onto what keel already emits: it reads `APP_URL` (the OAuth callback
 base) and writes its secrets onto the same additive secret-store convention.
-keel creates the `<project>-infrastructure` repo; Pier creates the `<project>`
-app repo. **Dependencies run one way only: keel → Pier → app.**
+keel creates the `<project>-infrastructure` repo; the `<project>` app repo is
+one you create and run Pier inside — Pier fills and pushes it, never creates it.
+**Dependencies run one way only: keel → Pier → app.**
 
 The keel↔Clerk asymmetry is mapped explicitly, said out loud rather than
 discovered: keel has N environments (`prod` / `staging+prod` /
@@ -340,8 +341,9 @@ Missing these? Pier skips the push loudly and still scaffolds the app.
   repo's CI (same shell keel ran in). Missing values are asked up front and
   the key is verified against the Container Registry before anything is
   created; an empty answer means CI builds but skips the registry push.
-- `gh` authenticated — to create and push the private app repo. The login is
-  verified up front, too. Skip Phase D entirely with `--skip-github`.
+- `gh` authenticated — to push the app repo and wire its CI. Pier runs inside
+  the (empty) repo you created and cloned; both the login and that the repo
+  resolves are verified up front. Skip Phase D entirely with `--skip-github`.
 
 </details>
 
@@ -353,8 +355,8 @@ Clerk's `paths` at the scaffold routes), pushes the keys to keel's Infisical
 project (when the `INFISICAL_*` coordinates are exported; skipped loudly
 otherwise), registers the deployed `APP_URL`s as allowed origins on the dev
 instance, scaffolds the containerized DDD Next.js repo, pulls the dev keys into
-`.env.local`, git-inits it, and publishes it to GitHub with its image-push CI
-configured.
+`.env.local`, commits it, and pushes it to the GitHub repo you launched pier in
+with its image-push CI configured.
 
 **Re-runs are idempotent end to end:** the Clerk app is reused by name, an
 existing pier scaffold is recognized and left untouched, the Infisical push
@@ -413,23 +415,22 @@ to `prod` so the wiring is ready; you replace them once production is set up.
 
 **Can I swap Clerk for something else?**
 That's what the seam is for. The domain and application layers are provider-free;
-swapping Clerk for WorkOS is an edit to `src/infrastructure/auth` and
+swapping Clerk for another provider is an edit to `src/infrastructure/auth` and
 `src/composition.ts`, and never touches `src/domain` or `src/application`.
-WorkOS AuthKit is the alternative on file, for apps expected to pass 50k users.
 
 **Does the generated app depend on pier?**
-No. Pier writes the repo, git-inits it, and leaves. Nothing in the result
+No. Pier fills the repo, commits, pushes, and leaves. Nothing in the result
 imports or calls pier.
 
 ## CLI reference
 
 ```
-npx github:Gambi97/pier [options]
+npx github:Gambi97/pier [options]   # run inside the empty repo you created + cloned
 
---name <project>      Fleet project name (Clerk application and app repo take it)
+--name <project>      Fleet project name (the Clerk application takes it)
 --methods <list>      Comma-separated: google, password, magic-link, email-otp
---dir <path>          Where to scaffold the app repo (default: ./<project>)
---skip-github         Do not create/push the GitHub repo (Phase D)
+--dir <path>          The repo to scaffold into (default: the current directory)
+--skip-github         Do not push or wire the GitHub repo (Phase D)
 --dry-run             Show what would happen without calling Clerk
 --yes                 Accept defaults, fail instead of prompting
 -h, --help            Show this help
