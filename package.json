@@ -1,6 +1,6 @@
 {
   "name": "@gambi97/pier-cli",
-  "version": "0.1.6",
+  "version": "0.1.7",
   "description": "One command from zero to working authentication for a keel-fleet app: Clerk application, secrets in Infisical, Next.js scaffold. Only Node required.",
   "keywords": [
     "pier",
