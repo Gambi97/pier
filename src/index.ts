@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { appendFile, readFile } from 'node:fs/promises';
+import { appendFile, readFile, stat } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { parseArgs } from 'node:util';
 
@@ -32,9 +32,9 @@ import {
   validateScalewaySecretKey,
 } from './scaleway.js';
 import {
+  commitScaffold,
   detectExistingScaffold,
   ensureEmptyTarget,
-  initGitRepo,
   planScaffold,
   writeLockfile,
   writeScaffold,
@@ -45,14 +45,11 @@ const HELP = `pier — the gangway your users board through
 Usage: npx github:Gambi97/pier [options]
 
 Options:
-  --name <project>      Fleet project name (Clerk application and app repo take it)
+  --name <project>      Fleet project name (Clerk application takes it)
   --methods <list>      Comma-separated: ${AUTH_METHODS.join(', ')}
-  --dir <path>          Where to scaffold the app repo (default: ./<project>)
-  --owner <login>       GitHub owner (organization or user) for the created repo
-                        (default: the account gh is logged in as)
-  --repo <name>         Repository name on GitHub (default: the project name —
-                        Clerk and Infisical always keep the project name)
-  --skip-github         Do not create/push the GitHub repo (Phase D)
+  --dir <path>          The repo to scaffold into (default: the current directory —
+                        pier runs inside the empty repo you created and cloned)
+  --skip-github         Do not push or wire the GitHub repo (Phase D)
   --dry-run             Show what would happen without calling Clerk
   --yes                 Accept defaults, fail instead of prompting
   -h, --help            Show this help
@@ -72,12 +69,13 @@ Credentials:
 Order (keel's principle — verify every link first, create last): pier first
 verifies the Infisical link (asking for missing credentials instead of
 skipping) and reads the keel project's environments, then the GitHub CLI
-login and the Scaleway registry key Phase D will hand the repo, then checks
-the Clerk credential, and only then creates: the Clerk application with the chosen auth
-methods, the keys pushed to keel's Infisical project (dev keys to non-prod
-environments, placeholders to prod, never overwriting), and the DDD-layered
-Next.js app repo with a gitignored .env.local, git-inited. Pier is not a
-dependency of the generated repo.
+login and that the repo pier runs in resolves, plus the Scaleway registry key
+Phase D wires, then checks the Clerk credential, and only then creates: the
+Clerk application with the chosen auth methods, the keys pushed to keel's
+Infisical project (dev keys to non-prod environments, placeholders to prod,
+never overwriting), and the DDD-layered Next.js scaffold committed into the
+repo and pushed to its GitHub origin. Pier never creates the repo and is not
+a dependency of the generated one.
 `;
 
 async function main(): Promise<void> {
@@ -86,8 +84,6 @@ async function main(): Promise<void> {
       name: { type: 'string' },
       methods: { type: 'string' },
       dir: { type: 'string' },
-      owner: { type: 'string' },
-      repo: { type: 'string' },
       'skip-github': { type: 'boolean', default: false },
       'dry-run': { type: 'boolean', default: false },
       yes: { type: 'boolean', default: false },
@@ -114,7 +110,9 @@ async function main(): Promise<void> {
     ).split(','),
   );
 
-  const targetDir = resolve(values.dir ?? projectName);
+  // Pier runs inside the repo you created and cloned — the default target is
+  // the current directory, not a fresh ./<project> pier would have to create.
+  const targetDir = resolve(values.dir ?? '.');
   const infisical = readInfisicalCoordinates(process.env);
 
   if (values['dry-run']) {
@@ -130,10 +128,10 @@ async function main(): Promise<void> {
     const files = Object.keys(planScaffold(projectName));
     p.log.info(
       `Would then scaffold the app repo (${files.length} files) into ${targetDir}, ` +
-        'pull the dev keys into its gitignored .env.local, git-init it, and ' +
+        'pull the dev keys into its gitignored .env.local, commit them, and ' +
         (values['skip-github']
           ? 'stop there (--skip-github).'
-          : 'publish it to GitHub with its image-push CI wiring.'),
+          : 'push to the GitHub repo pier is running in, wiring its image-push CI.'),
     );
     p.outro('Nothing was called.');
     return;
@@ -257,13 +255,15 @@ async function main(): Promise<void> {
   }
 
   // Phase 0 (continued) — the links Phase D will need, verified while there
-  // is still nothing to orphan. First the GitHub CLI login (a bad one used
-  // to surface only after the Clerk app, the scaffold and the commit
-  // existed), then the Scaleway registry key the generated CI pushes images
-  // with — asked up front like every other credential, not discovered as a
-  // warning at the end of the run.
+  // is still nothing to orphan. First the GitHub CLI login and that the repo
+  // pier runs in actually resolves (pier never creates it — a missing repo or
+  // a bad login used to surface only after the Clerk app, the scaffold and
+  // the commit existed), then the Scaleway registry key the generated CI
+  // pushes images with — asked up front like every other credential, not
+  // discovered as a warning at the end of the run.
   let skipGithub = values['skip-github'] === true;
   let publisher: GitHubPublisher | undefined;
+  let repoUrl: string | undefined;
   if (!skipGithub) {
     publisher = new GitHubPublisher();
     try {
@@ -273,25 +273,48 @@ async function main(): Promise<void> {
         (login) => `GitHub connected — gh is logged in as ${login}`,
         () => publisher!.verifyAuth(process.cwd()),
       );
+      // Pier runs inside the repo, so the target must already exist — resolving
+      // it from a missing directory would spawn gh with a bad cwd and surface
+      // as a confusing "gh not found". Say what is actually wrong instead.
+      const targetExists = await stat(targetDir)
+        .then((s) => s.isDirectory())
+        .catch(() => false);
+      if (!targetExists) {
+        throw new GhError(
+          `"${targetDir}" does not exist — create the repo and clone it, then run pier inside ` +
+            'it (or point --dir at the clone).',
+        );
+      }
+      repoUrl = await step(
+        spin,
+        'Resolving the GitHub repo pier is running in',
+        (url) => `Repo: ${url} — pier will push its scaffold here (never creates it)`,
+        () => publisher!.resolveRepo(targetDir),
+      );
     } catch (error) {
       if (!(error instanceof GhError)) throw error;
       if (nonInteractive) {
         p.log.error(
           `GitHub verification failed (${error.message}). Nothing was created — run ` +
-            '`gh auth login` (or pass --skip-github) and re-run pier.',
+            '`gh auth login`, create and clone the repo (or pass --skip-github), and re-run pier.',
         );
         process.exit(1);
       }
       const proceed = await p.confirm({
-        message: `GitHub CLI not ready (${error.message}). Continue without the GitHub publish?`,
+        message: `GitHub not ready (${error.message}). Continue without the GitHub push?`,
       });
       bailOnCancel(proceed);
       if (!proceed) {
-        p.cancel('Run `gh auth login`, then re-run pier. Nothing was created.');
+        p.cancel(
+          'Create and clone the repo (and `gh auth login`), then re-run pier inside it. ' +
+            'Nothing was created.',
+        );
         process.exit(1);
       }
       skipGithub = true;
-      p.log.warn('GitHub publish descoped — re-run pier after `gh auth login` to publish.');
+      p.log.warn(
+        'GitHub push descoped — re-run pier inside the cloned repo to push and wire its CI.',
+      );
     }
   }
 
@@ -621,39 +644,43 @@ async function main(): Promise<void> {
 
   let gitReady = existingScaffold;
   if (!existingScaffold) {
-    gitReady = await initGitRepo(targetDir);
+    gitReady = await commitScaffold(targetDir);
     if (gitReady) {
-      p.log.info('Git repository initialized with a first commit.');
+      p.log.info('Scaffold committed to the repo.');
     } else {
-      p.log.warn('Could not git-init the repo (no git, or no git identity) — commit it yourself.');
+      p.log.warn(
+        'Could not commit the scaffold (no git, or no git identity) — commit it yourself.',
+      );
     }
   }
 
-  // Phase D — hand the repo over to GitHub and wire its image-push CI.
-  // The gh login and the registry key were settled in Phase 0; this only
-  // spends them.
+  // Phase D — push the scaffold to the repo pier runs in and wire its
+  // image-push CI. The gh login, the repo and the registry key were all
+  // settled in Phase 0; this only spends them. Pier never creates the repo.
   if (skipGithub) {
     p.log.info(
       values['skip-github']
-        ? 'GitHub publish skipped (--skip-github).'
-        : 'GitHub publish skipped (gh was not ready — see Phase 0).',
+        ? 'GitHub push skipped (--skip-github).'
+        : 'GitHub push skipped (gh/repo was not ready — see Phase 0).',
     );
   } else if (!gitReady) {
-    p.log.warn('Skipping the GitHub publish: the repo has no commit yet.');
+    p.log.warn('Skipping the GitHub push: the repo has no commit yet.');
   } else {
-    // gh resolves a bare name to the logged-in user; --owner routes the
-    // repo into an organization, --repo detaches the repo name from the
-    // project name (which Clerk and Infisical keep).
-    const repoName = values.repo?.trim() || projectName;
-    const repoSlug = values.owner ? `${values.owner}/${repoName}` : repoName;
     try {
-      const repoUrl = await step(
-        spin,
-        'Publishing to GitHub (private repo)',
-        (url) => `On GitHub: ${url}`,
-        () => publisher!.publish(targetDir, repoSlug),
-      );
-      void repoUrl;
+      if (existingScaffold) {
+        // Re-run: the scaffold is already on the remote, and day-2 commits are
+        // normal git flow, not pier's business — leave the push alone and only
+        // re-apply the CI wiring below (idempotent, and the env list may have
+        // changed after a keel apply).
+        p.log.info(`Already on GitHub: ${repoUrl} — leaving the push to normal git flow.`);
+      } else {
+        await step(
+          spin,
+          'Pushing the scaffold to GitHub',
+          () => `On GitHub: ${repoUrl}`,
+          () => publisher!.push(targetDir),
+        );
+      }
       await publisher!.setVariable(targetDir, 'SCW_REGION', scwRegion);
       await publisher!.setVariable(targetDir, 'PROJECT_NAME', projectName);
       if (nonProdEnvs && nonProdEnvs.length > 0) {
@@ -675,8 +702,8 @@ async function main(): Promise<void> {
     } catch (error) {
       if (!(error instanceof GhError)) throw error;
       p.log.warn(
-        `GitHub publish incomplete (${error.message}). Manual path: ` +
-          `cd ${targetDir} && gh repo create ${repoSlug} --private --source . --push`,
+        `GitHub push incomplete (${error.message}). Manual path: ` +
+          `cd ${targetDir} && git push -u origin HEAD`,
       );
     }
   }

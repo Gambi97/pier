@@ -1,5 +1,5 @@
 import { spawnSync } from 'node:child_process';
-import { mkdtemp, readFile, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -199,6 +199,12 @@ describe('writeScaffold', () => {
   it('accepts an existing empty directory and refuses a non-empty one', async () => {
     const empty = await mkdtemp(join(tmpdir(), 'pier-empty-'));
     await expect(ensureEmptyTarget(empty)).resolves.toBeUndefined();
+
+    // A freshly created + cloned empty repo holds only `.git` — that is the
+    // directory pier is meant to run inside, so it still counts as empty.
+    const cloned = await mkdtemp(join(tmpdir(), 'pier-cloned-'));
+    await mkdir(join(cloned, '.git'));
+    await expect(ensureEmptyTarget(cloned)).resolves.toBeUndefined();
 
     const dirty = await mkdtemp(join(tmpdir(), 'pier-dirty-'));
     await writeFile(join(dirty, 'keep.txt'), 'x');
